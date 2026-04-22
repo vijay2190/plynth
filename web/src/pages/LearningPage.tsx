@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Sparkles, CheckCircle2, SkipForward, CalendarClock, Flame, ExternalLink, Trash2,
-  Wand2, Pencil, Undo2, ChevronLeft, ChevronRight, Calendar as CalendarIcon,
+  Wand2, Pencil, Undo2, ChevronLeft, ChevronRight, Calendar as CalendarIcon, Flag,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
@@ -11,6 +11,8 @@ import { Button } from '@/components/ui/Button';
 import { Input, Label, Textarea } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter, DialogClose } from '@/components/ui/Dialog';
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/Popover';
+import { Calendar } from '@/components/ui/Calendar';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Loader';
 import { supabase } from '@/lib/supabase';
@@ -41,7 +43,7 @@ type PlanRow = {
   status: 'pending' | 'completed' | 'skipped' | 'deferred';
   source: 'ai' | 'manual';
   ai_generated: boolean;
-  learning_topics?: { topic_name: string };
+  learning_topics?: { topic_name: string; priority?: number; target_completion_date?: string | null };
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -77,7 +79,8 @@ export function LearningPage() {
     queryKey: ['plan', userId, viewDate],
     enabled: !!userId,
     queryFn: async () => {
-      const { data } = await supabase.from('learning_plans').select('*, learning_topics(topic_name)')
+      const { data } = await supabase.from('learning_plans')
+        .select('*, learning_topics(topic_name, priority, target_completion_date)')
         .eq('user_id', userId!).eq('date', viewDate).order('order_in_day');
       return (data ?? []) as PlanRow[];
     },
@@ -186,6 +189,22 @@ export function LearningPage() {
     }
     return cells;
   }, [heatQ.data]);
+
+  // Sort: high priority (priority >=4 OR target within 7 days) first, then by order_in_day.
+  // Completed/skipped sink to the bottom regardless.
+  const sortedPlan = useMemo(() => {
+    const items = [...(planQ.data ?? [])];
+    const score = (p: PlanRow) => {
+      const sunk = p.status === 'completed' || p.status === 'skipped' || p.status === 'deferred' ? 1000 : 0;
+      const pri = p.learning_topics?.priority ?? 3;
+      const tgt = p.learning_topics?.target_completion_date;
+      const daysLeft = tgt ? Math.round((new Date(tgt + 'T00:00:00Z').getTime() - new Date(viewDate + 'T00:00:00Z').getTime()) / 86400000) : 999;
+      const urgent = pri >= 4 || daysLeft <= 7 ? 0 : 100;
+      return sunk + urgent + (p.order_in_day ?? 0);
+    };
+    items.sort((a, b) => score(a) - score(b));
+    return items;
+  }, [planQ.data, viewDate]);
 
   function shiftDate(days: number) {
     setViewDate((cur) => shiftIso(cur, days));
@@ -310,16 +329,12 @@ export function LearningPage() {
               <div className="flex items-center gap-1">
                 <Button size="sm" variant="outline" onClick={() => shiftDate(-1)} title="Previous day"><ChevronLeft className="h-4 w-4" /></Button>
                 <div className="relative">
-                  <Button size="sm" variant="outline" type="button"
-                    onClick={(e) => {
-                      const input = (e.currentTarget.parentElement?.querySelector('input[type=date]') as HTMLInputElement | null);
-                      if (input?.showPicker) input.showPicker(); else input?.focus();
-                    }}>
-                    <CalendarIcon className="h-4 w-4" /> {fmtDate(viewDate)}
-                  </Button>
-                  <input type="date" value={viewDate}
-                    onChange={(e) => setViewDate(e.target.value || todayStr())}
-                    className="absolute inset-0 opacity-0 pointer-events-none" tabIndex={-1} aria-hidden="true" />
+                  <DatePicker value={viewDate} onChange={(v) => setViewDate(v || todayStr())}
+                    trigger={(
+                      <Button size="sm" variant="outline" type="button">
+                        <CalendarIcon className="h-4 w-4" /> {fmtDate(viewDate)}
+                      </Button>
+                    )} />
                 </div>
                 <Button size="sm" variant="outline" onClick={() => shiftDate(1)} title="Next day"><ChevronRight className="h-4 w-4" /></Button>
                 <Button size="sm" variant="outline" onClick={() => setViewDate(todayStr())}>Today</Button>
@@ -335,15 +350,24 @@ export function LearningPage() {
                 <EmptyState title="Nothing scheduled" description="Click 'Generate plan' or add a custom item." />
               ) : (
                 <AnimatePresence>
-                  {(planQ.data ?? []).map((p) => {
+                  {sortedPlan.map((p) => {
                     const isDone = p.status === 'completed';
                     const isSkipped = p.status === 'skipped' || p.status === 'deferred';
+                    const pri = p.learning_topics?.priority ?? 3;
+                    const tgt = p.learning_topics?.target_completion_date;
+                    const daysLeft = tgt ? Math.round((new Date(tgt + 'T00:00:00Z').getTime() - new Date(viewDate + 'T00:00:00Z').getTime()) / 86400000) : null;
+                    const isHighPriority = pri >= 4 || (daysLeft !== null && daysLeft <= 7);
                     return (
                       <motion.div key={p.id} layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        className={cn('p-3 rounded-lg border', (isDone || isSkipped) && 'opacity-60 bg-muted/40')}>
+                        className={cn('p-3 rounded-lg border', (isDone || isSkipped) && 'opacity-60 bg-muted/40', isHighPriority && !isDone && !isSkipped && 'border-red-500/60 bg-red-500/5')}>
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
-                            <p className={cn('font-medium break-words', (isDone || isSkipped) && 'line-through')}>{p.title}</p>
+                            <p className={cn('font-medium break-words flex items-center gap-2', (isDone || isSkipped) && 'line-through')}>
+                              {isHighPriority && !isDone && !isSkipped && (
+                                <Flag className="h-4 w-4 text-red-500 shrink-0" aria-label="High priority" />
+                              )}
+                              <span>{p.title}</span>
+                            </p>
                             {p.description && <p className="text-sm text-muted-foreground mt-0.5 break-words">{p.description}</p>}
                             <div className="flex flex-wrap gap-2 mt-2">
                               <Badge variant="outline">{p.learning_topics?.topic_name}</Badge>
@@ -351,6 +375,11 @@ export function LearningPage() {
                               <Badge variant={p.source === 'manual' ? 'outline' : 'secondary'}>
                                 {p.source === 'manual' ? 'manual' : 'AI'}
                               </Badge>
+                              {isHighPriority && !isDone && !isSkipped && (
+                                <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/40">
+                                  {pri >= 4 && daysLeft !== null && daysLeft <= 7 ? `P${pri} · ${daysLeft}d left` : pri >= 4 ? `P${pri} high` : `${daysLeft}d left`}
+                                </Badge>
+                              )}
                               {p.status !== 'pending' && <Badge variant="outline">{p.status}</Badge>}
                               {(p.resource_links ?? []).map((r, i) => (
                                 <a key={i} href={r.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-primary hover:underline break-all">
@@ -488,7 +517,10 @@ function TopicForm({ initial, onDone }: { initial?: Topic; onDone: () => void })
             <option value="active">Active</option><option value="paused">Paused</option><option value="completed">Completed</option>
           </select>
         </div>
-        <div className="space-y-1.5"><Label>Target completion</Label><Input type="date" value={target} onChange={(e) => setTarget(e.target.value)} /></div>
+        <div className="space-y-1.5">
+          <Label>Target completion</Label>
+          <DatePicker value={target} onChange={setTarget} placeholder="Pick a date" />
+        </div>
       </div>
       <DialogFooter>
         <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
@@ -506,6 +538,9 @@ function PlanItemForm({
   const { session } = useSession();
   const firstTopic = topics[0]?.id ?? '';
   const [topicId, setTopicId] = useState<string>(initial?.topic_id ?? firstTopic);
+  const [creatingTopic, setCreatingTopic] = useState(false);
+  const [newTopicName, setNewTopicName] = useState('');
+  const [newTopicLevel, setNewTopicLevel] = useState<Topic['level']>('beginner');
   const [title, setTitle] = useState(initial?.title ?? '');
   const [description, setDescription] = useState(initial?.description ?? '');
   const [minutes, setMinutes] = useState(initial?.estimated_minutes ?? 30);
@@ -523,11 +558,22 @@ function PlanItemForm({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!session) return;
-    if (!topicId) return toast.error('Add a topic first');
     setBusy(true);
+    let effectiveTopicId = topicId;
+    if (creatingTopic) {
+      const name = newTopicName.trim();
+      if (!name) { setBusy(false); return toast.error('Enter a topic name'); }
+      const { data, error } = await supabase.from('learning_topics').insert({
+        user_id: session.user.id, topic_name: name, level: newTopicLevel,
+        priority: 3, status: 'active',
+      }).select('id').single();
+      if (error || !data) { setBusy(false); return toast.error(error?.message || 'Could not create topic'); }
+      effectiveTopicId = data.id;
+    }
+    if (!effectiveTopicId) { setBusy(false); return toast.error('Pick or create a topic'); }
     const cleanLinks = links.filter((l) => l.url.trim()).map((l) => ({ label: l.label.trim() || l.url, url: l.url.trim() }));
     const payload = {
-      topic_id: topicId,
+      topic_id: effectiveTopicId,
       title: title.trim(),
       description: description.trim() || null,
       estimated_minutes: Math.max(1, Number(minutes) || 30),
@@ -558,11 +604,30 @@ function PlanItemForm({
   return (
     <form onSubmit={submit} className="space-y-3">
       <div className="space-y-1.5">
-        <Label>Topic</Label>
-        <select value={topicId} onChange={(e) => setTopicId(e.target.value)} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm">
-          {topics.length === 0 && <option value="">No topics yet — add a topic first</option>}
-          {topics.map((t) => <option key={t.id} value={t.id}>{t.topic_name}</option>)}
-        </select>
+        <div className="flex items-center justify-between">
+          <Label>Topic</Label>
+          <button type="button" className="text-xs text-primary hover:underline"
+            onClick={() => setCreatingTopic((v) => !v)}>
+            {creatingTopic ? 'Pick existing' : '+ New topic'}
+          </button>
+        </div>
+        {creatingTopic ? (
+          <div className="grid grid-cols-[1fr_auto] gap-2">
+            <Input autoFocus required value={newTopicName} onChange={(e) => setNewTopicName(e.target.value)}
+              placeholder="e.g. Kubernetes operators" />
+            <select value={newTopicLevel} onChange={(e) => setNewTopicLevel(e.target.value as Topic['level'])}
+              className="h-10 rounded-lg border border-input bg-background px-3 text-sm">
+              <option value="beginner">Beginner</option>
+              <option value="intermediate">Intermediate</option>
+              <option value="advanced">Advanced</option>
+            </select>
+          </div>
+        ) : (
+          <select value={topicId} onChange={(e) => setTopicId(e.target.value)} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm">
+            {topics.length === 0 && <option value="">No topics yet — click '+ New topic'</option>}
+            {topics.map((t) => <option key={t.id} value={t.id}>{t.topic_name}</option>)}
+          </select>
+        )}
       </div>
       <div className="space-y-1.5"><Label>Title</Label><Input required value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Read chapter 4 of Effective C++" /></div>
       <div className="space-y-1.5"><Label>Description</Label><Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} /></div>
@@ -587,5 +652,51 @@ function PlanItemForm({
         <Button type="submit" disabled={busy}>{busy ? 'Saving…' : initial ? 'Save' : 'Add item'}</Button>
       </DialogFooter>
     </form>
+  );
+}
+
+// ----- Themed date picker (Calendar in a Popover) -----
+function DatePicker({
+  value, onChange, placeholder, trigger,
+}: {
+  value: string;
+  onChange: (iso: string) => void;
+  placeholder?: string;
+  trigger?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = value ? new Date(value + 'T00:00:00') : undefined;
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        {trigger ?? (
+          <button type="button"
+            className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-left flex items-center gap-2 hover:bg-accent/40 transition-colors">
+            <CalendarIcon className="h-4 w-4 text-muted-foreground" />
+            {value ? fmtDate(value) : <span className="text-muted-foreground">{placeholder ?? 'Pick a date'}</span>}
+          </button>
+        )}
+      </PopoverTrigger>
+      <PopoverContent className="w-auto p-0">
+        <Calendar
+          mode="single"
+          selected={selected}
+          onSelect={(d) => {
+            if (d) {
+              const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+              onChange(iso);
+              setOpen(false);
+            } else {
+              onChange('');
+            }
+          }}
+          initialFocus
+        />
+        <div className="flex items-center justify-between border-t border-border p-2">
+          <Button type="button" size="sm" variant="ghost" onClick={() => { onChange(''); setOpen(false); }}>Clear</Button>
+          <Button type="button" size="sm" variant="ghost" onClick={() => { onChange(todayStr()); setOpen(false); }}>Today</Button>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

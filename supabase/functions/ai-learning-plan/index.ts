@@ -44,12 +44,25 @@ async function recentForTopic(sb: ReturnType<typeof admin>, userId: string, topi
   return { skipped, completed };
 }
 
+const LEVEL_GUIDANCE: Record<string, string> = {
+  beginner: 'Cover fundamentals, syntax, and "hello world" style intro. Assume zero prior knowledge.',
+  intermediate: 'SKIP all introductory content (no "intro", no "hello world", no basic syntax, no basic data types, no basic loops/control flow, no basic functions). Assume the learner already knows the fundamentals. Focus on idiomatic patterns, design choices, debugging, common pitfalls, performance, libraries/frameworks, and intermediate-only topics.',
+  advanced: 'SKIP fundamentals AND intermediate basics. Focus on internals, performance tuning, concurrency, memory model, ABI/FFI, compiler/runtime details, advanced design patterns, real-world architecture, and topics rarely covered in tutorials.',
+};
+
 async function generateForTopic(sb: ReturnType<typeof admin>, userId: string, topicId: string, date: string) {
   const { data: topic } = await sb.from('learning_topics').select('*').eq('id', topicId).eq('user_id', userId).maybeSingle();
   if (!topic) throw new Error('topic not found');
   const { skipped, completed } = await recentForTopic(sb, userId, topicId);
 
-  const prompt = `You are a learning coach. Build a micro-plan (3-5 short items, total ~60-90 min) for the topic "${topic.topic_name}" at ${topic.level} level. Avoid repeating these recently-skipped items: ${JSON.stringify(skipped)}. Already-completed: ${JSON.stringify(completed)}. Each item must include 1-2 free public resource_links (docs, blog posts, YouTube).`;
+  const guidance = LEVEL_GUIDANCE[topic.level] ?? LEVEL_GUIDANCE.intermediate;
+  const prompt = `You are a learning coach. Build a micro-plan (3-5 short items, total ~60-90 min) for the topic "${topic.topic_name}" at ${topic.level.toUpperCase()} level.
+
+LEVEL RULES (strict): ${guidance}
+
+Avoid repeating these recently-skipped items: ${JSON.stringify(skipped)}.
+Already-completed (do not repeat): ${JSON.stringify(completed)}.
+Each item must include 1-2 free public resource_links (docs, blog posts, YouTube). Titles must be specific (e.g. "RAII patterns for resource ownership" not "Introduction to C++").`;
 
   console.log('[ai-learning-plan] single-topic', JSON.stringify({ userId, topic: topic.topic_name }));
   const res = await aiJSON<{ items: PlanItem[] }>(prompt, SCHEMA_HINT);
@@ -110,11 +123,16 @@ async function generateDaily(sb: ReturnType<typeof admin>, userId: string, date:
 
   const topicBlocks = await Promise.all(allocations.map(async (a) => {
     const { skipped, completed } = await recentForTopic(sb, userId, a.topic.id);
+    const tgt = a.topic.target_completion_date;
+    const daysLeft = tgt ? Math.max(0, Math.round((new Date(tgt).getTime() - new Date(date + 'T00:00:00Z').getTime()) / 86400000)) : null;
     return {
       topic_id: a.topic.id,
       topic_name: a.topic.topic_name,
       level: a.topic.level,
-      target_completion_date: a.topic.target_completion_date,
+      level_guidance: LEVEL_GUIDANCE[a.topic.level] ?? LEVEL_GUIDANCE.intermediate,
+      priority: a.topic.priority,
+      target_completion_date: tgt,
+      days_left: daysLeft,
       item_count: a.items,
       minute_budget: a.minutes,
       avoid_recently_skipped: skipped,
@@ -122,7 +140,20 @@ async function generateDaily(sb: ReturnType<typeof admin>, userId: string, date:
     };
   }));
 
-  const prompt = `You are a learning coach. Build a unified study plan across multiple topics for the same user.\n\nFor each topic below, generate EXACTLY "item_count" micro-items whose total minutes is close to (within +/- 10 of) that topic's "minute_budget". Topics with closer target_completion_date or higher item_count should get denser items. Each item must include 1-2 free public resource_links (docs, blog posts, YouTube). Set "topic_id" on each item to the topic's id from the input.\n\nTopics:\n${JSON.stringify(topicBlocks, null, 2)}\n\nReturn a single "items" array containing items for ALL topics combined.`;
+  const prompt = `You are a learning coach. Build a unified study plan across multiple topics for the same user.
+
+For each topic below, generate EXACTLY "item_count" micro-items whose total minutes is close to (within +/- 10 of) that topic's "minute_budget".
+
+STRICT LEVEL RULES per topic: respect the topic's "level" and "level_guidance". Do NOT generate beginner/introductory content for intermediate or advanced topics. Item titles must be specific (e.g. "Async runtime internals in Tokio" not "Introduction to Rust").
+
+Do NOT repeat any title in "already_completed" or "avoid_recently_skipped".
+
+Each item must include 1-2 free public resource_links (docs, blog posts, YouTube). Set "topic_id" on each item to the topic's id from the input.
+
+Topics:
+${JSON.stringify(topicBlocks, null, 2)}
+
+Return a single "items" array containing items for ALL topics combined.`;
 
   console.log('[ai-learning-plan] daily', JSON.stringify({ userId, date, topics: topicBlocks.length, maxItems, budgetMin }));
   const res = await aiJSON<{ items: DailyPlanItem[] }>(prompt, DAILY_SCHEMA_HINT);
