@@ -151,12 +151,12 @@ function BrowseTab() {
           <div className="grid gap-3 sm:grid-cols-2">
             {listingsQ.data!.map((l: any) => (
               <motion.div key={l.id} layout>
-                <Card>
+                <Card className="overflow-hidden">
                   <CardContent className="p-4">
                     <div className="flex justify-between gap-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="font-semibold truncate">{l.title}</p>
-                        <p className="text-sm text-muted-foreground">{l.company}</p>
+                        <p className="text-sm text-muted-foreground truncate">{l.company}</p>
                       </div>
                       {l.is_new && <Badge variant="success">New</Badge>}
                     </div>
@@ -165,7 +165,7 @@ function BrowseTab() {
                       {l.location && <Badge variant="secondary">{l.location}</Badge>}
                       {l.salary_range && <Badge variant="secondary">{l.salary_range}</Badge>}
                     </div>
-                    {l.description_snippet && <p className="text-sm text-muted-foreground mt-2 line-clamp-2">{l.description_snippet}</p>}
+                    {l.description_snippet && <p className="text-sm text-muted-foreground mt-2 line-clamp-2 break-words">{l.description_snippet}</p>}
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <a href={l.job_url} target="_blank" rel="noreferrer">
                         <Button size="sm" variant="outline"><ExternalLink className="h-4 w-4" /> View</Button>
@@ -234,18 +234,18 @@ function SavedTab() {
           <div className="grid gap-3 sm:grid-cols-2">
             {savedQ.data!.map((l: any) => (
               <motion.div key={l.id} layout>
-                <Card>
+                <Card className="overflow-hidden">
                   <CardContent className="p-4">
                     <div className="min-w-0">
                       <p className="font-semibold truncate">{l.title}</p>
-                      <p className="text-sm text-muted-foreground">{l.company}</p>
+                      <p className="text-sm text-muted-foreground truncate">{l.company}</p>
                     </div>
                     <div className="flex flex-wrap gap-2 mt-2">
                       <Badge variant="outline">{l.source}</Badge>
                       {l.location && <Badge variant="secondary">{l.location}</Badge>}
                       {l.salary_range && <Badge variant="secondary">{l.salary_range}</Badge>}
                     </div>
-                    {l.description_snippet && <p className="text-sm text-muted-foreground mt-2 line-clamp-2">{l.description_snippet}</p>}
+                    {l.description_snippet && <p className="text-sm text-muted-foreground mt-2 line-clamp-2 break-words">{l.description_snippet}</p>}
                     <div className="flex gap-2 mt-3 flex-wrap">
                       <a href={l.job_url} target="_blank" rel="noreferrer">
                         <Button size="sm" variant="outline"><ExternalLink className="h-4 w-4" /> View</Button>
