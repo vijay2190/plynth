@@ -38,14 +38,32 @@ export function SettingsPage() {
   });
 
   const [profileF, setProfileF] = useState({ full_name: '', timezone: '' });
+  const [learnF, setLearnF] = useState({ daily_plan_max_items: 8, daily_plan_budget_min: 90 });
   useEffect(() => {
     if (profileQ.data) {
       setProfileF({
         full_name: profileQ.data.full_name ?? '',
         timezone: profileQ.data.timezone ?? 'Asia/Kolkata',
       });
+      setLearnF({
+        daily_plan_max_items: profileQ.data.daily_plan_max_items ?? 8,
+        daily_plan_budget_min: profileQ.data.daily_plan_budget_min ?? 90,
+      });
     }
   }, [profileQ.data]);
+
+  async function saveLearning(e: React.FormEvent) {
+    e.preventDefault();
+    if (!userId) return;
+    const max = Math.max(1, Math.min(30, Number(learnF.daily_plan_max_items) || 8));
+    const budget = Math.max(15, Math.min(480, Number(learnF.daily_plan_budget_min) || 90));
+    const { error } = await supabase.from('profiles').update({
+      daily_plan_max_items: max, daily_plan_budget_min: budget,
+    }).eq('user_id', userId);
+    if (error) return toast.error(error.message);
+    toast.success('Learning preferences saved');
+    qc.invalidateQueries({ queryKey: ['profile-settings', userId] });
+  }
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
@@ -121,6 +139,30 @@ export function SettingsPage() {
           {(['light', 'dark', 'system'] as const).map(t => (
             <Button key={t} variant={theme === t ? 'default' : 'outline'} onClick={() => setTheme(t)}>{t}</Button>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Learning</CardTitle>
+          <CardDescription>Controls how AI builds your daily study plan.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={saveLearning} className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Max items per day (1–30)</Label>
+                <Input type="number" min={1} max={30} value={learnF.daily_plan_max_items}
+                  onChange={e => setLearnF({ ...learnF, daily_plan_max_items: Number(e.target.value) })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Daily budget (minutes, 15–480)</Label>
+                <Input type="number" min={15} max={480} step={5} value={learnF.daily_plan_budget_min}
+                  onChange={e => setLearnF({ ...learnF, daily_plan_budget_min: Number(e.target.value) })} />
+              </div>
+            </div>
+            <Button type="submit">Save learning preferences</Button>
+          </form>
         </CardContent>
       </Card>
 
