@@ -17,3 +17,6 @@ mail-bridge/.env
 .supabase/
 supabase/.branches/
 supabase/.temp/
+
+.env.secrets
+web/.env

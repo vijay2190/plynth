@@ -1,5 +1,5 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import {
   LayoutDashboard, BookOpen, Briefcase, CheckSquare, Wallet, Settings,
   Menu, Bell, LogOut, Moon, Sun, Monitor,
@@ -9,6 +9,7 @@ import { cn, greeting } from '@/lib/utils';
 import { supabase } from '@/lib/supabase';
 import { useSession } from './useSession';
 import { useTheme } from './ThemeProvider';
+import { ErrorBoundary } from './ErrorBoundary';
 import { useQuery } from '@tanstack/react-query';
 
 const NAV = [
@@ -24,6 +25,7 @@ export function AppShell() {
   const [collapsed, setCollapsed] = useState(false);
   const { session } = useSession();
   const navigate = useNavigate();
+  const loc = useLocation();
   const { theme, setTheme } = useTheme();
 
   const { data: profile } = useQuery({
@@ -104,17 +106,9 @@ export function AppShell() {
         </header>
 
         <main className="flex-1 px-4 md:px-6 py-6 pb-24 md:pb-6 overflow-x-hidden">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.2 }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          <ErrorBoundary key={loc.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
 
         {/* Mobile bottom nav */}

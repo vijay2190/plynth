@@ -1,6 +1,9 @@
 // fetch-jobs: queries JSearch (RapidAPI), dedupes, inserts new listings.
+// Quota-guarded: increments public.api_usage atomically and refuses past 200/mo.
 
 import { admin, json, corsHeaders, userFromAuth, getSecret } from '../_shared/util.ts';
+
+const JSEARCH_MONTHLY_LIMIT = 200;
 
 interface JSearchJob {
   job_id: string;
@@ -36,6 +39,13 @@ async function fetchForUser(sb: ReturnType<typeof admin>, userId: string) {
   const keyword = (settings.keywords ?? [])[0] ?? 'software engineer';
   const location = (settings.locations ?? [])[0];
   const remote = settings.remote_preference ?? 'any';
+
+  // Reserve a quota slot BEFORE making the external call.
+  const { error: quotaErr } = await sb.rpc('api_usage_increment', {
+    p_api_name: 'jsearch',
+    p_limit: JSEARCH_MONTHLY_LIMIT,
+  });
+  if (quotaErr) throw new Error(`quota_exceeded: ${quotaErr.message}`);
 
   const jobs = await searchJobs(keyword, location, remote);
   let inserted = 0;

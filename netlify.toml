@@ -1,11 +1,10 @@
 [build]
   base    = "web"
-  command = "pnpm install --frozen-lockfile=false && pnpm build"
-  publish = "web/dist"
+  command = "npm ci && npm run build"
+  publish = "dist"
 
 [build.environment]
   NODE_VERSION = "20"
-  PNPM_VERSION = "10"
 
 [[redirects]]
   from = "/*"

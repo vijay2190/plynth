@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Download } from 'lucide-react';
 import { toast } from 'sonner';
@@ -38,9 +38,14 @@ export function SettingsPage() {
   });
 
   const [profileF, setProfileF] = useState({ full_name: '', timezone: '' });
-  if (profileQ.data && !profileF.full_name && !profileF.timezone) {
-    setProfileF({ full_name: profileQ.data.full_name ?? '', timezone: profileQ.data.timezone });
-  }
+  useEffect(() => {
+    if (profileQ.data) {
+      setProfileF({
+        full_name: profileQ.data.full_name ?? '',
+        timezone: profileQ.data.timezone ?? 'Asia/Kolkata',
+      });
+    }
+  }, [profileQ.data]);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
