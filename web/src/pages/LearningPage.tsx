@@ -107,15 +107,21 @@ export function LearningPage() {
     },
   });
 
-  const quotaQ = useQuery({
-    queryKey: ['gemini-usage'],
+  const aiProviderQ = useQuery({
+    queryKey: ['ai-provider'],
     queryFn: async () => {
-      const month = new Date().toISOString().slice(0, 7);
-      const { data } = await supabase.from('api_usage').select('count,monthly_limit')
-        .eq('api_name', 'gemini').eq('month_year', month).maybeSingle();
-      return data ?? { count: 0, monthly_limit: 10000 };
+      const { data } = await supabase.from('app_settings')
+        .select('value').eq('key', 'ai_provider_chain').maybeSingle();
+      const chain = (data?.value as string | undefined) || 'groq,ollama';
+      const primary = chain.split(',')[0]?.trim() || 'groq';
+      const labels: Record<string, string> = {
+        groq: 'Groq Llama 3.3 70B',
+        ollama: 'Self-hosted Ollama',
+        gemini: 'Google Gemini',
+      };
+      return { chain, primary, label: labels[primary] || primary };
     },
-    refetchInterval: 30_000,
+    staleTime: 60_000,
   });
 
   const updatePlanItemM = useMutation({
@@ -145,7 +151,6 @@ export function LearningPage() {
     mutationFn: async (topicId: string) => ai.generateLearningPlan(topicId, viewDate),
     onSuccess: (items) => {
       qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
-      qc.invalidateQueries({ queryKey: ['gemini-usage'] });
       toast.success(`Plan regenerated (${items.length} items)`);
     },
     onError: (e) => toast.error((e as Error).message),
@@ -155,7 +160,6 @@ export function LearningPage() {
     mutationFn: async () => ai.generateDailyPlan(viewDate),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
-      qc.invalidateQueries({ queryKey: ['gemini-usage'] });
       const map: Record<string, { items: number; minutes: number }> = {};
       for (const a of res.allocations) map[a.topic_id] = { items: a.items, minutes: a.minutes };
       setAllocations(map);
@@ -194,9 +198,9 @@ export function LearningPage() {
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3 flex-wrap">
           <h1 className="text-2xl font-bold">Learning Hub</h1>
-          {quotaQ.data && (
-            <Badge variant="outline" title="Gemini API calls this month (free tier ≈ 1500/day)">
-              Gemini: {quotaQ.data.count} / {quotaQ.data.monthly_limit} this month
+          {aiProviderQ.data && (
+            <Badge variant="outline" title={`Provider chain: ${aiProviderQ.data.chain}`}>
+              AI: {aiProviderQ.data.label} • ready
             </Badge>
           )}
         </div>

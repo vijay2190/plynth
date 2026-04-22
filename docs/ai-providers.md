@@ -1,55 +1,68 @@
 # AI Providers — Plynth
 
-The server-side AI dispatcher lives in [supabase/functions/_shared/ai-provider.ts](../supabase/functions/_shared/ai-provider.ts).
-Switch providers by setting the `AI_PROVIDER` Supabase secret. No code changes needed at call sites — they all go through `aiJSON()`.
+Plynth's server-side AI calls go through a single dispatcher in
+[supabase/functions/_shared/ai-provider.ts](../supabase/functions/_shared/ai-provider.ts).
+Switch providers by setting Supabase secrets — no code change at call sites.
+
+## Default chain (no quota)
 
 ```bash
-supabase secrets set AI_PROVIDER=gemini   # current default
+supabase secrets set AI_PROVIDER=chain
+supabase secrets set AI_PROVIDER_CHAIN=groq,ollama
 ```
 
-## Current: Gemini (default)
+The dispatcher tries providers in order. On rate-limit / network / timeout it
+advances to the next. Auth or programming errors bubble immediately.
 
-- Models tried in order: `gemini-2.5-flash` → `gemini-2.0-flash` → `gemini-flash-latest`.
-- Free tier on `generativelanguage.googleapis.com` is generous (~15 RPM, 1M TPM, 1500 req/day for 2.5 Flash as of 2026-04).
-- Pricing (paid tier): ~$0.075 / 1M input tokens, $0.30 / 1M output tokens.
-- Known caveat: SAFETY filter occasionally blocks innocuous prompts. We log `finishReason` and `promptFeedback` so SAFETY blocks are visible in `supabase functions logs`.
-
-## Future: Qwen3-30B-A3B
-
-> Note: the model name "qwen3.6-35B-A3B" does not exist. The intended model is **Qwen3-30B-A3B** — a Mixture-of-Experts model with **3 B active parameters** out of a **30 B** total, released April 2025 under Apache-2.0.
-
-### Hosting options
-| Option | Notes | Rough cost |
+| Position | Provider | Why |
 | --- | --- | --- |
-| **Self-host** (vLLM / Ollama) | Apache-2.0 weights. Needs ~24 GB VRAM (Q4) or ~60 GB (FP16). | $0 marginal once GPU is paid for. |
-| **Together.ai** | OpenAI-compatible API. | ~$0.20 / M in, $0.60 / M out |
-| **Fireworks** | OpenAI-compatible. | similar to Together |
-| **Hyperbolic** | OpenAI-compatible. | ~$0.10 / M (cheapest hosted) |
-| **OpenRouter** | OpenAI-compatible, free tier exists but heavily throttled. | Free / pay per use |
-| **Alibaba DashScope** | Native API + OpenAI-compat endpoint. | Region-dependent |
+| 1 | **Groq Cloud** | Free, ~14,400 req/day per model, no monthly cap, ~10× faster than Gemini. OpenAI-compatible. Runs `llama-3.3-70b-versatile` (primary) and `llama-3.1-8b-instant` (fast). |
+| 2 | **Self-hosted Ollama** | Truly unlimited; runs on your box via Cloudflare tunnel. CPU inference with `llama3.1:8b` (~8 GB RAM). |
+| opt-in | **Gemini** | Original; kept for A/B (`AI_PROVIDER=gemini`). Free tier has a hard monthly cap and a SAFETY filter that occasionally blocks benign topics like "OpenBMC" — that's why it's no longer the default. |
 
-### Pros (vs Gemini)
-- **No SAFETY blocks** — open-weight models don't refuse on benign topic names like "openBMC" or "exploit techniques". This is the suspected cause of the empty-payload bug we just fixed.
-- Open weights → can self-host for privacy / unlimited quota.
-- 32 K context (extensible to 128 K via YaRN).
-- Strong on code + multilingual (Chinese, Japanese, etc.).
-- Stable structured-output mode via guided decoding (vLLM / outlines).
+## Setup
 
-### Cons
-- Hosted endpoints are **~3× more expensive** than Gemini 2.5 Flash for input tokens.
-- Smaller community than OpenAI/Gemini → fewer SDKs, less doc.
-- Self-host needs hardware + uptime ops.
+### 1. Groq (mandatory for primary)
 
-### Limits to plan around
-- Together free trial: $1 credit, then pay-per-use.
-- OpenRouter free models: 20 req/min, 200 req/day.
-- Self-host: only your own hardware throughput.
+1. Create a free key at https://console.groq.com/keys
+2. `supabase secrets set GROQ_API_KEY=<key>`
+3. (optional) `supabase secrets set GROQ_MODEL_PRIMARY=llama-3.3-70b-versatile GROQ_MODEL_FAST=llama-3.1-8b-instant`
 
-## Recommendation
+### 2. Ollama fallback (optional but recommended)
 
-1. **Now**: stay on Gemini — it works and is free.
-2. **When chatbot ships**: add `AI_PROVIDER=qwen` wiring in [`_shared/ai-provider.ts`](../supabase/functions/_shared/ai-provider.ts) using the OpenAI-compatible client (`fetch` against `${QWEN_BASE_URL}/chat/completions`). Required secrets:
-   - `QWEN_API_KEY`
-   - `QWEN_BASE_URL` (e.g. `https://api.together.xyz/v1`)
-   - `QWEN_MODEL` (e.g. `Qwen/Qwen3-30B-A3B-Instruct`)
-3. A/B test by flipping `AI_PROVIDER` on a single edge function first, not all at once.
+```bash
+bash scripts/install-ollama-bridge.sh
+# prints the public URL — paste into:
+supabase secrets set OLLAMA_BASE_URL='https://<sub>.trycloudflare.com'
+supabase secrets set OLLAMA_MODEL='llama3.1:8b'
+supabase secrets set OLLAMA_SHARED_SECRET='<choose-strong-token>'
+```
+
+Without `OLLAMA_BASE_URL` the chain skips Ollama and surfaces the Groq error.
+
+## Adding a new provider
+
+1. Add `_shared/<name>.ts` exporting `<name>JSON<T>(prompt, schemaHint)` and
+   `<name>Text(prompt, system?)`. Throw `RateLimitError` (from
+   `_shared/groq.ts`) on 429 so the chain can advance.
+2. Add a `case` in `tryJSON` and `tryText` inside
+   [`_shared/ai-provider.ts`](../supabase/functions/_shared/ai-provider.ts).
+3. Add the provider name to `AI_PROVIDER_CHAIN`.
+
+## API surface for callers
+
+```ts
+import { aiJSON, aiText } from '../_shared/ai-provider.ts';
+
+const plan = await aiJSON<{ items: Item[] }>(prompt, schemaHint);
+const advice = await aiText('Suggest 3 ETFs for monthly SIP of 10k', 'You are a frugal Indian investor.');
+```
+
+## Use-cases inside Plynth
+
+| Surface | Method | Notes |
+| --- | --- | --- |
+| Learning plans (per-topic + daily allocation) | `aiJSON` | live |
+| Job-search optimization (resume → JD match) | `aiText` | planned |
+| Finance advice chatbot | `aiText` | planned |
+| Topic research (C, C++, OpenBMC, Linux) | `aiJSON` | live; open-source models avoid Gemini's SAFETY blocks |

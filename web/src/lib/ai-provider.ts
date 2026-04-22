@@ -38,9 +38,9 @@ async function unwrapError(error: any, data: any): Promise<never> {
     if (body?.error) msg = body.error;
   } catch { /* ignore */ }
   if (!error && data?.error) msg = data.error;
-  // Friendlier message for the most common Gemini failure mode.
-  if (/\b429\b|exceeded your current quota|RESOURCE_EXHAUSTED/i.test(msg)) {
-    msg = 'Gemini quota exceeded — please wait a minute and try again, or check your Google AI Studio quota.';
+  // Friendlier message when every provider in the chain rate-limited.
+  if (/rate-limited|RateLimitError|RESOURCE_EXHAUSTED/i.test(msg)) {
+    msg = 'AI providers are busy right now. Please retry in a moment.';
   }
   throw new Error(msg);
 }
