@@ -32,8 +32,11 @@ async function getCaps(sb: ReturnType<typeof admin>, userId: string) {
     .eq('user_id', userId).maybeSingle();
   return {
     maxItems: Math.max(1, Math.min(30, prof?.daily_plan_max_items ?? DEFAULT_MAX_ITEMS)),
-    budgetMin: Math.max(15, Math.min(480, prof?.daily_plan_budget_min ?? DEFAULT_BUDGET_MIN)),
-  };
+    // null = no time cap; only maxItems constrains the plan.
+    budgetMin: prof?.daily_plan_budget_min == null
+      ? null
+      : Math.max(15, Math.min(480, prof.daily_plan_budget_min)),
+  } as { maxItems: number; budgetMin: number | null };
 }
 
 async function recentForTopic(sb: ReturnType<typeof admin>, userId: string, topicId: string) {
@@ -118,7 +121,7 @@ async function generateDaily(sb: ReturnType<typeof admin>, userId: string, date:
   if (!topics || topics.length === 0) throw new Error('No active topics. Add a topic first.');
 
   const { maxItems, budgetMin } = await getCaps(sb, userId);
-  const allocations = allocate(topics, date, budgetMin, maxItems);
+  const allocations = allocate(topics, date, budgetMin ?? DEFAULT_BUDGET_MIN, maxItems);
   if (allocations.length === 0) throw new Error('No topics qualified for today.');
 
   const topicBlocks = await Promise.all(allocations.map(async (a) => {
@@ -205,6 +208,142 @@ Return a single "items" array containing items for ALL topics combined.`;
   };
 }
 
+// Estimate days needed to cover a topic when no target date is set.
+// Heuristic: weeks-of-coverage = level_weeks + (5 - priority). P5 beginner = 2 wks, P1 advanced = 12 wks.
+const LEVEL_WEEKS: Record<string, number> = { beginner: 2, intermediate: 4, advanced: 8 };
+function estimateDaysFor(topic: any): number {
+  const lw = LEVEL_WEEKS[topic.level] ?? 4;
+  const pri = Math.max(1, Math.min(5, topic.priority ?? 3));
+  const weeks = Math.max(1, lw + (5 - pri));
+  return weeks * 7;
+}
+
+async function generateMultiDay(sb: ReturnType<typeof admin>, userId: string, fromDate: string) {
+  const { data: topics } = await sb.from('learning_topics').select('*')
+    .eq('user_id', userId).eq('status', 'active').order('priority', { ascending: false });
+  if (!topics || topics.length === 0) throw new Error('No active topics. Add a topic first.');
+
+  const { maxItems, budgetMin } = await getCaps(sb, userId);
+  const fromMs = new Date(fromDate + 'T00:00:00Z').getTime();
+
+  // Determine the planning horizon: the latest target_completion_date among topics,
+  // or fromDate + max(estimateDaysFor) for topics without a target.
+  let horizonDays = 0;
+  for (const t of topics) {
+    if (t.target_completion_date) {
+      const d = Math.max(1, Math.round((new Date(t.target_completion_date + 'T00:00:00Z').getTime() - fromMs) / 86400000));
+      horizonDays = Math.max(horizonDays, d);
+    } else {
+      horizonDays = Math.max(horizonDays, estimateDaysFor(t));
+    }
+  }
+  horizonDays = Math.min(horizonDays, 60); // hard cap to keep AI calls bounded
+
+  // Per-topic total items budget: roughly (days the topic covers) * (avg items per day for that topic).
+  // We let the daily allocator distribute proportionally; here we just expand into per-day buckets.
+  const dates: string[] = [];
+  for (let i = 0; i < horizonDays; i++) {
+    dates.push(new Date(fromMs + i * 86400000).toISOString().slice(0, 10));
+  }
+
+  // Wipe future AI rows from fromDate onward (preserve manual rows).
+  await sb.from('learning_plans').delete()
+    .eq('user_id', userId).gte('date', fromDate).eq('source', 'ai');
+
+  let totalItems = 0;
+  let daysPlanned = 0;
+
+  for (const day of dates) {
+    // For each day, only consider topics whose target hasn't passed.
+    const activeForDay = topics.filter((t) => !t.target_completion_date || t.target_completion_date >= day);
+    if (activeForDay.length === 0) break;
+
+    const allocations = allocate(activeForDay, day, budgetMin ?? 90, maxItems);
+    if (allocations.length === 0) continue;
+
+    const topicBlocks = allocations.map((a) => {
+      const tgt = a.topic.target_completion_date;
+      const daysLeft = tgt ? Math.max(0, Math.round((new Date(tgt + 'T00:00:00Z').getTime() - new Date(day + 'T00:00:00Z').getTime()) / 86400000)) : null;
+      return {
+        topic_id: a.topic.id,
+        topic_name: a.topic.topic_name,
+        level: a.topic.level,
+        level_guidance: LEVEL_GUIDANCE[a.topic.level] ?? LEVEL_GUIDANCE.intermediate,
+        priority: a.topic.priority,
+        days_left: daysLeft,
+        item_count: a.items,
+        minute_budget: a.minutes,
+      };
+    });
+
+    const prompt = `You are a learning coach building day ${daysPlanned + 1} of a multi-day study plan (date: ${day}).\n\nFor each topic below, generate EXACTLY "item_count" micro-items totaling close to "minute_budget" minutes. Respect each topic's level_guidance strictly. Item titles must be specific and progressive (later days should build on earlier ones; assume earlier days have covered the basics if level is intermediate/advanced). Each item must include 1-2 free public resource_links. Set "topic_id" on each item.\n\nTopics for ${day}:\n${JSON.stringify(topicBlocks, null, 2)}\n\nReturn a single "items" array.`;
+
+    let res: { items: DailyPlanItem[] };
+    try {
+      res = await aiJSON<{ items: DailyPlanItem[] }>(prompt, DAILY_SCHEMA_HINT);
+    } catch (e) {
+      console.warn('[ai-learning-plan] multi-day skip day', day, String(e));
+      continue;
+    }
+    const validIds = new Set(topicBlocks.map((t) => t.topic_id));
+    let items = (res.items ?? []).filter((it) => validIds.has(it.topic_id));
+    if (!items.length) continue;
+
+    // Per-topic cap.
+    const perTopicCap = new Map(topicBlocks.map((t) => [t.topic_id, t.item_count]));
+    const counted = new Map<string, number>();
+    items = items.filter((it) => {
+      const cap = perTopicCap.get(it.topic_id) ?? 0;
+      const used = counted.get(it.topic_id) ?? 0;
+      if (used >= cap) return false;
+      counted.set(it.topic_id, used + 1);
+      return true;
+    });
+
+    let order = 0;
+    const rows = items.map((it) => ({
+      user_id: userId, topic_id: it.topic_id, date: day,
+      title: it.title, description: it.description ?? null,
+      estimated_minutes: it.estimated_minutes ?? 20,
+      resource_links: it.resource_links ?? [],
+      order_in_day: order++, status: 'pending', ai_generated: true, source: 'ai',
+    }));
+    if (rows.length) {
+      await sb.from('learning_plans').insert(rows);
+      totalItems += rows.length;
+      daysPlanned++;
+    }
+  }
+
+  return { days_planned: daysPlanned, total_items: totalItems, horizon_days: horizonDays };
+}
+
+// Generate ONE replacement item for a topic (used by skip-cascade fallback when no future
+// items exist to shift up).
+async function generateReplacement(sb: ReturnType<typeof admin>, userId: string, topicId: string, date: string) {
+  const { data: topic } = await sb.from('learning_topics').select('*').eq('id', topicId).eq('user_id', userId).maybeSingle();
+  if (!topic) throw new Error('topic not found');
+  const { skipped, completed } = await recentForTopic(sb, userId, topicId);
+  const guidance = LEVEL_GUIDANCE[topic.level] ?? LEVEL_GUIDANCE.intermediate;
+  const prompt = `You are a learning coach. The user just SKIPPED a task for the topic "${topic.topic_name}" (${topic.level} level). Generate ONE alternative micro-item (~20-30 min) that takes a different angle.\n\nLEVEL RULES (strict): ${guidance}\n\nDo NOT repeat any of these recently-skipped items: ${JSON.stringify(skipped)}.\nDo NOT repeat already-completed: ${JSON.stringify(completed)}.\nInclude 1-2 free public resource_links.`;
+  const res = await aiJSON<{ items: PlanItem[] }>(prompt, SCHEMA_HINT);
+  const item = (res.items ?? [])[0];
+  if (!item) throw new Error('AI returned no replacement item');
+
+  const { data: maxRow } = await sb.from('learning_plans').select('order_in_day')
+    .eq('user_id', userId).eq('date', date).order('order_in_day', { ascending: false }).limit(1).maybeSingle();
+  const order = (maxRow?.order_in_day ?? -1) + 1;
+
+  const { data: inserted } = await sb.from('learning_plans').insert({
+    user_id: userId, topic_id: topicId, date,
+    title: item.title, description: item.description ?? null,
+    estimated_minutes: item.estimated_minutes ?? 25,
+    resource_links: item.resource_links ?? [],
+    order_in_day: order, status: 'pending', ai_generated: true, source: 'ai',
+  }).select('*, learning_topics(topic_name, priority, target_completion_date)').single();
+  return inserted;
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
   const sb = admin();
@@ -230,6 +369,19 @@ Deno.serve(async (req) => {
       const date = (typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date)) ? body.date : today;
       const out = await generateDaily(sb, u.id, date);
       return json(out);
+    }
+
+    if (body.scope === 'multi_day') {
+      const date = (typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date)) ? body.date : today;
+      const out = await generateMultiDay(sb, u.id, date);
+      return json(out);
+    }
+
+    if (body.scope === 'replacement') {
+      if (!body.topic_id) return json({ error: 'topic_id required for replacement' }, 400);
+      const date = (typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date)) ? body.date : today;
+      const item = await generateReplacement(sb, u.id, body.topic_id, date);
+      return json({ item });
     }
 
     const topicId = body.topic_id;

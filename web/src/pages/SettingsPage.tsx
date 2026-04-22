@@ -38,16 +38,20 @@ export function SettingsPage() {
   });
 
   const [profileF, setProfileF] = useState({ full_name: '', timezone: '' });
-  const [learnF, setLearnF] = useState({ daily_plan_max_items: 8, daily_plan_budget_min: 90 });
+  const [learnF, setLearnF] = useState<{ daily_plan_max_items: number; budget_enabled: boolean; daily_plan_budget_hours: number }>({
+    daily_plan_max_items: 8, budget_enabled: false, daily_plan_budget_hours: 1.5,
+  });
   useEffect(() => {
     if (profileQ.data) {
       setProfileF({
         full_name: profileQ.data.full_name ?? '',
         timezone: profileQ.data.timezone ?? 'Asia/Kolkata',
       });
+      const min = profileQ.data.daily_plan_budget_min;
       setLearnF({
         daily_plan_max_items: profileQ.data.daily_plan_max_items ?? 8,
-        daily_plan_budget_min: profileQ.data.daily_plan_budget_min ?? 90,
+        budget_enabled: min != null,
+        daily_plan_budget_hours: min != null ? Math.round((min / 60) * 4) / 4 : 1.5,
       });
     }
   }, [profileQ.data]);
@@ -56,9 +60,13 @@ export function SettingsPage() {
     e.preventDefault();
     if (!userId) return;
     const max = Math.max(1, Math.min(30, Number(learnF.daily_plan_max_items) || 8));
-    const budget = Math.max(15, Math.min(480, Number(learnF.daily_plan_budget_min) || 90));
+    let budgetMin: number | null = null;
+    if (learnF.budget_enabled) {
+      const hours = Math.max(0.25, Math.min(8, Number(learnF.daily_plan_budget_hours) || 1.5));
+      budgetMin = Math.round(hours * 60);
+    }
     const { error } = await supabase.from('profiles').update({
-      daily_plan_max_items: max, daily_plan_budget_min: budget,
+      daily_plan_max_items: max, daily_plan_budget_min: budgetMin,
     }).eq('user_id', userId);
     if (error) return toast.error(error.message);
     toast.success('Learning preferences saved');
@@ -156,9 +164,23 @@ export function SettingsPage() {
                   onChange={e => setLearnF({ ...learnF, daily_plan_max_items: Number(e.target.value) })} />
               </div>
               <div className="space-y-1.5">
-                <Label>Daily budget (minutes, 15–480)</Label>
-                <Input type="number" min={15} max={480} step={5} value={learnF.daily_plan_budget_min}
-                  onChange={e => setLearnF({ ...learnF, daily_plan_budget_min: Number(e.target.value) })} />
+                <div className="flex items-center justify-between">
+                  <Label>Daily hours (0.25–8)</Label>
+                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer">
+                    <input type="checkbox" checked={learnF.budget_enabled}
+                      onChange={e => setLearnF({ ...learnF, budget_enabled: e.target.checked })} />
+                    Cap study time
+                  </label>
+                </div>
+                <Input type="number" min={0.25} max={8} step={0.25}
+                  disabled={!learnF.budget_enabled}
+                  value={learnF.daily_plan_budget_hours}
+                  onChange={e => setLearnF({ ...learnF, daily_plan_budget_hours: Number(e.target.value) })} />
+                <p className="text-xs text-muted-foreground">
+                  {learnF.budget_enabled
+                    ? `Plan capped at ~${Math.round(learnF.daily_plan_budget_hours * 60)} min/day.`
+                    : 'No time cap — only "Max items per day" applies.'}
+                </p>
               </div>
             </div>
             <Button type="submit">Save learning preferences</Button>

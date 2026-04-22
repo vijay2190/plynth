@@ -127,6 +127,7 @@ export function LearningPage() {
     staleTime: 60_000,
   });
 
+  // Status update for COMPLETE only (skip and defer have dedicated paths now).
   const updatePlanItemM = useMutation({
     mutationFn: async ({ id, status }: { id: string; status: PlanRow['status'] }) => {
       const { error } = await supabase.from('learning_plans').update({
@@ -137,6 +138,64 @@ export function LearningPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
       qc.invalidateQueries({ queryKey: ['heat', userId] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  // Skip = optimistic remove + 5s undo toast. After expiry: cascade-shift the next
+  // future item up; if none exist, ask AI for a single replacement.
+  const skippedRowsRef = (window as any).__plynthSkipped ??= new Map<string, PlanRow>();
+  function skipWithUndo(p: PlanRow) {
+    skippedRowsRef.set(p.id, p);
+    qc.setQueryData(['plan', userId, viewDate], (cur: PlanRow[] | undefined) =>
+      (cur ?? []).filter((r) => r.id !== p.id),
+    );
+    let undone = false;
+    const t = setTimeout(async () => {
+      if (undone) return;
+      try {
+        await supabase.from('learning_plans').update({ status: 'skipped' }).eq('id', p.id);
+        const { data: shifted } = await supabase.rpc('shift_plans_up', { p_from_date: viewDate });
+        if (!shifted) {
+          // No future item to pull up — ask AI for a single replacement.
+          try {
+            await ai.generateReplacementItem(p.topic_id, viewDate);
+          } catch (e) {
+            console.warn('replacement failed', e);
+          }
+        }
+      } catch (e) {
+        toast.error((e as Error).message);
+      } finally {
+        skippedRowsRef.delete(p.id);
+        qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
+      }
+    }, 5000);
+    toast('Task skipped', {
+      description: p.title,
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          undone = true;
+          clearTimeout(t);
+          skippedRowsRef.delete(p.id);
+          qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
+        },
+      },
+    });
+  }
+
+  // Defer = move this exact row to tomorrow via RPC.
+  const deferM = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.rpc('defer_plan_item', { p_id: id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
+      qc.invalidateQueries({ queryKey: ['plan', userId, shiftIso(viewDate, 1)] });
+      toast.success('Moved to tomorrow');
     },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -167,6 +226,16 @@ export function LearningPage() {
       for (const a of res.allocations) map[a.topic_id] = { items: a.items, minutes: a.minutes };
       setAllocations(map);
       toast.success(`Plan ready: ${res.items.length} items across ${res.allocations.length} topics`);
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const multiDayM = useMutation({
+    mutationFn: async () => ai.generateMultiDayPlan(viewDate),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['plan', userId] });
+      qc.invalidateQueries({ queryKey: ['heat', userId] });
+      toast.success(`Multi-day plan ready: ${res.total_items} items across ${res.days_planned} days (horizon ${res.horizon_days}d)`);
     },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -224,6 +293,9 @@ export function LearningPage() {
           )}
         </div>
         <div className="flex gap-2 flex-wrap">
+          <Button onClick={() => multiDayM.mutate()} disabled={multiDayM.isPending} title="Plan all topics across multiple days until target completion">
+            <Sparkles className="h-4 w-4" /> {multiDayM.isPending ? 'Planning…' : 'Generate plan'}
+          </Button>
           <Button variant="outline" onClick={() => dailyM.mutate()} disabled={dailyM.isPending}>
             <Wand2 className="h-4 w-4" /> {dailyM.isPending ? 'Generating…' : `Generate plan for ${fmtDate(viewDate)}`}
           </Button>
@@ -406,10 +478,10 @@ export function LearningPage() {
                               </Button>
                               {!isDone && (
                                 <>
-                                  <Button size="sm" variant="outline" onClick={() => updatePlanItemM.mutate({ id: p.id, status: 'skipped' })}>
+                                  <Button size="sm" variant="outline" onClick={() => skipWithUndo(p)}>
                                     <SkipForward className="h-4 w-4" /> Skip
                                   </Button>
-                                  <Button size="sm" variant="outline" onClick={() => updatePlanItemM.mutate({ id: p.id, status: 'deferred' })}>
+                                  <Button size="sm" variant="outline" onClick={() => deferM.mutate(p.id)} disabled={deferM.isPending} title="Move this task to tomorrow">
                                     <CalendarClock className="h-4 w-4" /> Defer
                                   </Button>
                                 </>

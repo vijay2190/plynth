@@ -23,9 +23,17 @@ export interface DailyPlanResult {
   allocations: DailyAllocation[];
 }
 
+export interface MultiDayResult {
+  days_planned: number;
+  total_items: number;
+  horizon_days: number;
+}
+
 export interface AIProvider {
   generateLearningPlan(topicId: string, date?: string): Promise<LearningPlanItem[]>;
   generateDailyPlan(date?: string): Promise<DailyPlanResult>;
+  generateMultiDayPlan(date?: string): Promise<MultiDayResult>;
+  generateReplacementItem(topicId: string, date?: string): Promise<unknown>;
 }
 
 // Surface the edge function's JSON error body. supabase-js wraps non-2xx
@@ -64,6 +72,26 @@ class EdgeFunctionProvider implements AIProvider {
     const items = (data?.items ?? []) as DailyPlanResult['items'];
     if (!items.length) throw new Error('AI returned no items. Please retry.');
     return { items, allocations: data?.allocations ?? [] };
+  }
+
+  async generateMultiDayPlan(date?: string): Promise<MultiDayResult> {
+    const { data, error } = await supabase.functions.invoke('ai-learning-plan', {
+      body: { scope: 'multi_day', date },
+    });
+    if (error || data?.error) await unwrapError(error, data);
+    return {
+      days_planned: data?.days_planned ?? 0,
+      total_items: data?.total_items ?? 0,
+      horizon_days: data?.horizon_days ?? 0,
+    };
+  }
+
+  async generateReplacementItem(topicId: string, date?: string): Promise<unknown> {
+    const { data, error } = await supabase.functions.invoke('ai-learning-plan', {
+      body: { scope: 'replacement', topic_id: topicId, date },
+    });
+    if (error || data?.error) await unwrapError(error, data);
+    return data?.item;
   }
 }
 
