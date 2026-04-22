@@ -1,0 +1,3 @@
+// Use a generated PNG fallback. Vite will resolve this via the manifest.
+// We provide simple coloured PNGs created at build time by users; for now
+// vite-plugin-pwa will warn but the build still succeeds.
