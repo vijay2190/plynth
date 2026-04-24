@@ -75,6 +75,28 @@ export function LearningPage() {
     },
   });
 
+  // Overdue per topic = pending items dated strictly BEFORE today.
+  const overdueQ = useQuery({
+    queryKey: ['overdue', userId],
+    enabled: !!userId,
+    queryFn: async () => {
+      const { data } = await supabase.from('learning_plans')
+        .select('topic_id,date')
+        .eq('user_id', userId!).eq('status', 'pending').lt('date', todayStr());
+      const byTopic = new Map<string, { items: number; days: Set<string> }>();
+      for (const r of data ?? []) {
+        const e = byTopic.get(r.topic_id) ?? { items: 0, days: new Set<string>() };
+        e.items += 1;
+        e.days.add(r.date as string);
+        byTopic.set(r.topic_id, e);
+      }
+      const out: Record<string, { items: number; days: number }> = {};
+      for (const [k, v] of byTopic) out[k] = { items: v.items, days: v.days.size };
+      return out;
+    },
+    refetchInterval: 60_000,
+  });
+
   const planQ = useQuery({
     queryKey: ['plan', userId, viewDate],
     enabled: !!userId,
@@ -138,6 +160,7 @@ export function LearningPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
       qc.invalidateQueries({ queryKey: ['heat', userId] });
+      qc.invalidateQueries({ queryKey: ['overdue', userId] });
     },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -169,6 +192,7 @@ export function LearningPage() {
       } finally {
         skippedRowsRef.delete(p.id);
         qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
+        qc.invalidateQueries({ queryKey: ['overdue', userId] });
       }
     }, 5000);
     toast('Task skipped', {
@@ -195,6 +219,7 @@ export function LearningPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['plan', userId, viewDate] });
       qc.invalidateQueries({ queryKey: ['plan', userId, shiftIso(viewDate, 1)] });
+      qc.invalidateQueries({ queryKey: ['overdue', userId] });
       toast.success('Moved to tomorrow');
     },
     onError: (e) => toast.error((e as Error).message),
@@ -235,6 +260,7 @@ export function LearningPage() {
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['plan', userId] });
       qc.invalidateQueries({ queryKey: ['heat', userId] });
+      qc.invalidateQueries({ queryKey: ['overdue', userId] });
       toast.success(`Multi-day plan ready: ${res.total_items} items across ${res.days_planned} days (horizon ${res.horizon_days}d)`);
     },
     onError: (e) => toast.error((e as Error).message),
@@ -365,6 +391,12 @@ export function LearningPage() {
                       <Badge variant="outline">{t.level}</Badge>
                       <Badge variant="outline">P{t.priority}</Badge>
                       <Badge variant={t.status === 'active' ? 'success' : 'secondary'}>{t.status}</Badge>
+                      {overdueQ.data?.[t.id] && (
+                        <Badge className="bg-red-500/15 text-red-600 dark:text-red-400 border-red-500/40"
+                          title={`${overdueQ.data[t.id].items} pending item(s) from ${overdueQ.data[t.id].days} previous day(s)`}>
+                          {overdueQ.data[t.id].items} due · {overdueQ.data[t.id].days}d
+                        </Badge>
+                      )}
                       {allocations[t.id] && (
                         <Badge variant="secondary">
                           {allocations[t.id].items} items · {allocations[t.id].minutes} min
