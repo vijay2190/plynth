@@ -1,101 +1,233 @@
 // send-reminder: dispatcher run every 5 minutes by pg_cron.
-// For each enabled reminder_settings row whose time_of_day falls inside the
-// last 5-minute window, build a digest and dispatch via mail / ntfy.
+// For each enabled reminder_settings row, expand `times_of_day[]` and fire
+// any time that falls inside the current 5-minute window. Per-fire dedup
+// uses public.reminder_log. Manual test via POST {test_reminder_id: uuid}.
 
-import { admin, json, corsHeaders } from '../_shared/util.ts';
+import { admin, json, corsHeaders, getSecret } from '../_shared/util.ts';
 import { sendMail } from '../_shared/mail.ts';
 import { pushNtfy } from '../_shared/ntfy.ts';
+import { renderDigestEmail, type MailSection } from '../_shared/mail-template.ts';
 
-function withinWindow(target: string, nowMin: number): boolean {
-  const [h, m] = target.split(':').map(Number);
-  const t = h * 60 + m;
-  // 5-minute window centered on cron tick
-  return Math.abs(t - nowMin) <= 4;
+const WINDOW_MIN = 4; // ±4 min around cron tick (cron runs every 5 min)
+
+interface DigestData {
+  sections: MailSection[];
+  flatLines: string[];
 }
 
-async function buildDigest(sb: ReturnType<typeof admin>, userId: string, category: string) {
+async function buildDigest(sb: ReturnType<typeof admin>, userId: string, category: string): Promise<DigestData> {
   const today = new Date().toISOString().slice(0, 10);
-  const lines: string[] = [];
+  const sections: MailSection[] = [];
+  const flatLines: string[] = [];
 
   if (category === 'all' || category === 'tasks') {
     const { data } = await sb.from('tasks').select('title,due_date,priority,status').eq('user_id', userId)
       .or(`due_date.eq.${today},and(due_date.lt.${today},status.neq.completed)`).neq('status', 'completed');
     if ((data ?? []).length) {
-      lines.push('<h3>Tasks</h3><ul>');
-      for (const t of data!) lines.push(`<li><b>${t.title}</b> — ${t.due_date ?? 'no date'} (${t.priority})</li>`);
-      lines.push('</ul>');
+      sections.push({
+        title: 'Tasks',
+        emoji: '✅',
+        items: data!.map((t) => ({
+          html: `<b>${escapeHtml(t.title)}</b>`,
+          meta: `${t.due_date ?? 'no date'} · ${t.priority}`,
+        })),
+      });
+      for (const t of data!) flatLines.push(`• ${t.title} (${t.priority})`);
     }
   }
   if (category === 'all' || category === 'learning') {
-    const { data } = await sb.from('learning_plans').select('title,estimated_minutes,status').eq('user_id', userId)
+    const { data } = await sb.from('learning_plans')
+      .select('title,estimated_minutes,status,learning_topics(topic_name)').eq('user_id', userId)
       .eq('date', today).neq('status', 'completed').order('order_in_day');
     if ((data ?? []).length) {
-      lines.push('<h3>Learning today</h3><ul>');
-      for (const p of data!) lines.push(`<li>${p.title} <i>(${p.estimated_minutes} min)</i></li>`);
-      lines.push('</ul>');
+      sections.push({
+        title: 'Learning today',
+        emoji: '📚',
+        items: data!.map((p: any) => ({
+          html: `<b>${escapeHtml(p.title)}</b>`,
+          meta: `${p.learning_topics?.topic_name ?? ''} · ${p.estimated_minutes} min`,
+        })),
+      });
+      for (const p of data!) flatLines.push(`• ${p.title} (${p.estimated_minutes}m)`);
     }
   }
   if (category === 'all' || category === 'finance') {
     const { data } = await sb.from('loans').select('name,emi_amount,emi_due_day,status').eq('user_id', userId).eq('status', 'active');
     const day = new Date().getDate();
-    const due = (data ?? []).filter(l => Math.abs(l.emi_due_day - day) <= 3);
+    const due = (data ?? []).filter((l) => Math.abs(l.emi_due_day - day) <= 3);
     if (due.length) {
-      lines.push('<h3>EMIs due soon</h3><ul>');
-      for (const l of due) lines.push(`<li><b>${l.name}</b> — ₹${l.emi_amount} on day ${l.emi_due_day}</li>`);
-      lines.push('</ul>');
+      sections.push({
+        title: 'EMIs due soon',
+        emoji: '💰',
+        items: due.map((l) => ({
+          html: `<b>${escapeHtml(l.name)}</b> &mdash; ₹${l.emi_amount}`,
+          meta: `Due day ${l.emi_due_day} of the month`,
+        })),
+      });
+      for (const l of due) flatLines.push(`• ${l.name} ₹${l.emi_amount} (day ${l.emi_due_day})`);
     }
   }
   if (category === 'all' || category === 'jobs') {
     const { data } = await sb.from('job_listings').select('title,company,job_url').eq('user_id', userId).eq('is_new', true).limit(10);
     if ((data ?? []).length) {
-      lines.push('<h3>New jobs</h3><ul>');
-      for (const j of data!) lines.push(`<li><a href="${j.job_url}">${j.title}</a> — ${j.company}</li>`);
-      lines.push('</ul>');
+      sections.push({
+        title: 'New jobs',
+        emoji: '💼',
+        items: data!.map((j) => ({
+          html: `<a href="${j.job_url}" style="color:#6366f1;text-decoration:none"><b>${escapeHtml(j.title)}</b></a>`,
+          meta: j.company,
+        })),
+      });
+      for (const j of data!) flatLines.push(`• ${j.title} @ ${j.company}`);
     }
   }
 
-  if (!lines.length) return null;
-  return `<div style="font-family:sans-serif;line-height:1.5">${lines.join('\n')}<hr><p style="color:#888;font-size:12px">Plynth digest</p></div>`;
+  return { sections, flatLines };
+}
+
+interface ReminderRow {
+  id: string;
+  user_id: string;
+  category: string;
+  channel: 'email' | 'ntfy' | 'both';
+  time_of_day: string;
+  times_of_day: string[];
+  days_of_week: number[];
+  enabled: boolean;
+  profiles?: { email?: string; full_name?: string; timezone?: string; ntfy_topic?: string };
+}
+
+async function dispatchOne(
+  sb: ReturnType<typeof admin>,
+  r: ReminderRow,
+  fireFor: string,
+  fireTime: string,
+  appUrl: string,
+): Promise<{ ok: boolean; channel: string }> {
+  const digest = await buildDigest(sb, r.user_id, r.category);
+  const greeting = greetingFor();
+  const subject = `Plynth · ${prettyCategory(r.category)} · ${fireTime.slice(0, 5)}`;
+  const html = renderDigestEmail({
+    greeting: `${greeting}${r.profiles?.full_name ? ', ' + r.profiles.full_name.split(' ')[0] : ''} 👋`,
+    intro: digest.sections.length
+      ? `Here's your ${prettyCategory(r.category).toLowerCase()} digest for today.`
+      : `No ${prettyCategory(r.category).toLowerCase()} items right now — you're all clear.`,
+    sections: digest.sections,
+    appUrl,
+    footerNote: `Reminder fired at ${fireTime.slice(0, 5)} (your local time).`,
+  });
+  const text = digest.flatLines.length
+    ? digest.flatLines.join('\n')
+    : `No ${prettyCategory(r.category).toLowerCase()} items right now — you're all clear.`;
+
+  let channel = 'none';
+  let ok = false;
+  if ((r.channel === 'email' || r.channel === 'both') && r.profiles?.email) {
+    const m = await sendMail({ to: r.profiles.email, subject, html, user_id: r.user_id });
+    channel = m.channel;
+    ok = m.ok || ok;
+  }
+  if (r.channel === 'ntfy' || r.channel === 'both') {
+    const sent = await pushNtfy({
+      title: subject,
+      message: text.slice(0, 280),
+      topic: r.profiles?.ntfy_topic,
+      priority: 'default',
+      tags: ['bell'],
+      click: appUrl,
+    });
+    if (sent) { channel = channel === 'none' ? 'ntfy' : channel + '+ntfy'; ok = ok || sent; }
+  }
+
+  // Log the fire (idempotent — primary key prevents duplicates)
+  await sb.from('reminder_log').insert({
+    reminder_id: r.id, fired_for: fireFor, fired_time: fireTime,
+  });
+
+  return { ok, channel };
 }
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
   const sb = admin();
+  const appUrl = (await getSecret('APP_URL')) ?? 'https://plynth.netlify.app';
+
+  // Manual test path
+  let testId: string | null = null;
+  if (req.method === 'POST') {
+    try { const body = await req.json(); testId = body?.test_reminder_id ?? null; } catch { /* ignore */ }
+  }
+
+  if (testId) {
+    const { data: r, error } = await sb.from('reminder_settings')
+      .select('*, profiles!inner(email,full_name,timezone,ntfy_topic)')
+      .eq('id', testId).maybeSingle();
+    if (error || !r) return json({ ok: false, error: 'reminder not found' }, 404);
+    const now = new Date();
+    const fireFor = now.toISOString().slice(0, 10);
+    const fireTime = `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:00`;
+    // Bypass dedup for manual tests by deleting the row first
+    await sb.from('reminder_log').delete().eq('reminder_id', testId).eq('fired_for', fireFor).eq('fired_time', fireTime);
+    const res = await dispatchOne(sb, r as ReminderRow, fireFor, fireTime, appUrl);
+    return json({ ok: res.ok, channel: res.channel, test: true });
+  }
+
   const now = new Date();
   const nowMin = now.getUTCHours() * 60 + now.getUTCMinutes();
   const dow = now.getUTCDay();
+  const today = now.toISOString().slice(0, 10);
 
-  const { data: rules } = await sb.from('reminder_settings').select('*, profiles!inner(email,full_name,timezone)')
+  const { data: rules } = await sb.from('reminder_settings')
+    .select('*, profiles!inner(email,full_name,timezone,ntfy_topic)')
     .eq('enabled', true);
 
   let dispatched = 0;
-  for (const r of rules ?? []) {
-    // Convert local time_of_day → UTC minute using profile timezone (best-effort: server runs UTC).
-    // Simple approach: assume time_of_day is in user's tz Asia/Kolkata-ish; offsets vary, but the
-    // 5-minute window centered on UTC works if user keeps reminder times in IST and we offset by -330.
-    const tz = (r as any).profiles?.timezone ?? 'Asia/Kolkata';
-    const offsetMin = tz === 'Asia/Kolkata' ? -330 : 0; // extend later
-    const targetUtcMin = ((nowMinFromTimeOfDay(r.time_of_day) + offsetMin) + 1440) % 1440;
-    if (Math.abs(targetUtcMin - nowMin) > 4) continue;
-    if (!(r.days_of_week as number[]).includes(dow)) continue;
+  let skipped = 0;
+  for (const raw of rules ?? []) {
+    const r = raw as ReminderRow;
+    if (!r.days_of_week?.includes(dow)) { skipped++; continue; }
+    const tz = r.profiles?.timezone ?? 'Asia/Kolkata';
+    const offsetMin = tz === 'Asia/Kolkata' ? -330 : 0;
 
-    const html = await buildDigest(sb, r.user_id, r.category);
-    if (!html) continue;
+    const times = (r.times_of_day && r.times_of_day.length) ? r.times_of_day : [r.time_of_day];
+    for (const t of times) {
+      if (!t) continue;
+      const localMin = nowMinFromTimeOfDay(t);
+      const targetUtcMin = ((localMin + offsetMin) + 1440) % 1440;
+      const diff = circularDiff(targetUtcMin, nowMin);
+      if (diff > WINDOW_MIN) continue;
 
-    const subject = `Plynth ${r.category} digest`;
-    if (r.channel === 'email' || r.channel === 'both') {
-      await sendMail({ to: (r as any).profiles?.email, subject, html, user_id: r.user_id });
+      // Dedup: skip if we already fired for (reminder, today, t)
+      const { data: existing } = await sb.from('reminder_log')
+        .select('reminder_id').eq('reminder_id', r.id).eq('fired_for', today).eq('fired_time', t).maybeSingle();
+      if (existing) continue;
+
+      const res = await dispatchOne(sb, r, today, t, appUrl);
+      if (res.ok) dispatched++;
     }
-    if (r.channel === 'ntfy' || r.channel === 'both') {
-      await pushNtfy({ title: subject, message: stripHtml(html).slice(0, 280), priority: 'default', tags: ['bell'] });
-    }
-    dispatched++;
   }
-  return json({ ok: true, dispatched });
+  return json({ ok: true, dispatched, skipped, scanned: rules?.length ?? 0 });
 });
 
+function pad(n: number): string { return n.toString().padStart(2, '0'); }
 function nowMinFromTimeOfDay(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
 }
-function stripHtml(s: string): string { return s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function circularDiff(a: number, b: number): number {
+  const d = Math.abs(a - b);
+  return Math.min(d, 1440 - d);
+}
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+function prettyCategory(c: string): string {
+  return ({ all: 'Daily', tasks: 'Tasks', learning: 'Learning', finance: 'Finance', jobs: 'Jobs' } as Record<string, string>)[c] ?? c;
+}
+function greetingFor(): string {
+  const h = new Date().getUTCHours() + 5; // crude IST lean
+  const ist = (h + 24) % 24;
+  if (ist < 12) return 'Good morning';
+  if (ist < 17) return 'Good afternoon';
+  return 'Good evening';
+}

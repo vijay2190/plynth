@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, Trash2, Download } from 'lucide-react';
+import { Plus, Trash2, Download, Send, Smartphone, Copy, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input, Label } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Loader';
+import { Switch } from '@/components/ui/Switch';
 import { supabase } from '@/lib/supabase';
 import { useSession } from '@/app/useSession';
 import { useTheme } from '@/app/ThemeProvider';
+import { cn } from '@/lib/utils';
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -85,7 +87,8 @@ export function SettingsPage() {
   const addReminderM = useMutation({
     mutationFn: async () => {
       const { error } = await supabase.from('reminder_settings').insert({
-        user_id: userId!, category: 'tasks', channel: 'both', time_of_day: '07:00', days_of_week: [1,2,3,4,5], enabled: true,
+        user_id: userId!, category: 'tasks', channel: 'both', time_of_day: '07:00',
+        times_of_day: ['07:00:00'], days_of_week: [1,2,3,4,5], enabled: true,
       });
       if (error) throw error;
     },
@@ -94,10 +97,43 @@ export function SettingsPage() {
 
   const updateReminderM = useMutation({
     mutationFn: async (r: any) => {
-      const { error } = await supabase.from('reminder_settings').update(r).eq('id', r.id);
+      // Mirror first time into the legacy time_of_day column for back-compat.
+      const patch: any = { ...r };
+      if (Array.isArray(r.times_of_day) && r.times_of_day.length) {
+        patch.time_of_day = r.times_of_day[0];
+      }
+      const { error } = await supabase.from('reminder_settings').update(patch).eq('id', r.id);
       if (error) throw error;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['reminder_settings', userId] }),
+    onMutate: async (r: any) => {
+      // Optimistic update so the toggle/checkbox state never lags behind
+      await qc.cancelQueries({ queryKey: ['reminder_settings', userId] });
+      const prev = qc.getQueryData<any[]>(['reminder_settings', userId]);
+      qc.setQueryData<any[]>(['reminder_settings', userId], (old) =>
+        (old ?? []).map((x) => (x.id === r.id ? { ...x, ...r } : x))
+      );
+      return { prev };
+    },
+    onError: (_e, _r, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['reminder_settings', userId], ctx.prev);
+      toast.error('Could not save reminder');
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['reminder_settings', userId] }),
+  });
+
+  const testReminderM = useMutation({
+    mutationFn: async (id: string) => {
+      const { data, error } = await supabase.functions.invoke('send-reminder', {
+        body: { test_reminder_id: id },
+      });
+      if (error) throw error;
+      return data as { ok: boolean; channel: string };
+    },
+    onSuccess: (res) => {
+      if (res.ok) toast.success(`Test sent via ${res.channel}`);
+      else toast.error('Test failed — check email_log');
+    },
+    onError: (e) => toast.error((e as Error).message),
   });
 
   const deleteReminderM = useMutation({
@@ -193,54 +229,130 @@ export function SettingsPage() {
           <div className="flex items-center justify-between">
             <div>
               <CardTitle>Reminders</CardTitle>
-              <CardDescription>Per-category schedule. Email goes via the mail bridge (Gmail) with Resend fallback. Push goes via ntfy.sh.</CardDescription>
+              <CardDescription>Per-category schedule. Email goes via the mail bridge (Gmail) with Resend fallback. Push goes via ntfy.sh (per-user topic below).</CardDescription>
             </div>
             <Button size="sm" onClick={() => addReminderM.mutate()}><Plus className="h-4 w-4" /> Add</Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
+          {/* Per-user ntfy topic + subscribe instructions */}
+          {profileQ.data?.ntfy_topic && (
+            <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
+              <div className="flex items-center gap-2 text-sm font-medium"><Smartphone className="h-4 w-4" /> Your push topic</div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 px-2 py-1.5 rounded bg-background border text-xs break-all">{profileQ.data.ntfy_topic}</code>
+                <Button size="sm" variant="outline" onClick={() => {
+                  navigator.clipboard.writeText(profileQ.data.ntfy_topic);
+                  toast.success('Copied');
+                }}><Copy className="h-3.5 w-3.5" /></Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Subscribe in the <a className="underline" href="https://ntfy.sh/app" target="_blank" rel="noreferrer">ntfy web app</a>{' '}
+                or install the <a className="underline" href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noreferrer">Android app</a>{' '}
+                / <a className="underline" href="https://apps.apple.com/us/app/ntfy/id1625396347" target="_blank" rel="noreferrer">iOS app</a>{' '}
+                and add this topic.
+              </p>
+              <a href={`https://ntfy.sh/${profileQ.data.ntfy_topic}`} target="_blank" rel="noreferrer"
+                className="inline-block text-xs text-primary underline">Open ntfy.sh/{profileQ.data.ntfy_topic} →</a>
+            </div>
+          )}
+
           {remindersQ.isLoading ? <Skeleton className="h-24" /> :
             (remindersQ.data ?? []).length === 0 ? <p className="text-sm text-muted-foreground">No reminders configured.</p> :
-            (remindersQ.data ?? []).map((r: any) => (
-              <div key={r.id} className="rounded-lg border p-3 space-y-2">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
-                  <div className="space-y-1"><Label className="text-xs">Category</Label>
-                    <select value={r.category} onChange={e => updateReminderM.mutate({ ...r, category: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm">
-                      <option value="tasks">Tasks digest</option>
-                      <option value="learning">Learning plan</option>
-                      <option value="finance">EMI due</option>
-                      <option value="jobs">New jobs</option>
-                      <option value="all">All-in-one digest</option>
-                    </select>
+            (remindersQ.data ?? []).map((r: any) => {
+              const times: string[] = (r.times_of_day && r.times_of_day.length) ? r.times_of_day : [r.time_of_day ?? '07:00:00'];
+              return (
+                <div key={r.id} className={cn('rounded-lg border p-3 space-y-3 transition-opacity', !r.enabled && 'opacity-50')}>
+                  {/* Header row: enabled toggle + delete */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Switch checked={!!r.enabled} onCheckedChange={(v) => updateReminderM.mutate({ ...r, enabled: v })} aria-label="Enable reminder" />
+                      <span className="text-sm font-medium">{r.enabled ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button size="sm" variant="outline" disabled={!r.enabled || testReminderM.isPending}
+                        onClick={() => testReminderM.mutate(r.id)} title="Send a test reminder right now">
+                        <Send className="h-3.5 w-3.5" /> Test
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={() => deleteReminderM.mutate(r.id)} title="Delete reminder">
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
-                  <div className="space-y-1"><Label className="text-xs">Channel</Label>
-                    <select value={r.channel} onChange={e => updateReminderM.mutate({ ...r, channel: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm">
-                      <option value="email">Email</option><option value="ntfy">Push (ntfy)</option><option value="both">Both</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1"><Label className="text-xs">Time</Label>
-                    <Input type="time" value={r.time_of_day?.slice(0,5)} onChange={e => updateReminderM.mutate({ ...r, time_of_day: `${e.target.value}:00` })} />
-                  </div>
-                  <div className="flex items-center justify-end gap-2">
-                    <label className="flex items-center gap-1 text-xs">
-                      <input type="checkbox" checked={r.enabled} onChange={e => updateReminderM.mutate({ ...r, enabled: e.target.checked })} /> Enabled
-                    </label>
-                    <Button size="icon" variant="ghost" onClick={() => deleteReminderM.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
-                  </div>
+
+                  <fieldset disabled={!r.enabled} className="space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1"><Label className="text-xs">Category</Label>
+                        <select value={r.category} onChange={e => updateReminderM.mutate({ ...r, category: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
+                          <option value="tasks">Tasks digest</option>
+                          <option value="learning">Learning plan</option>
+                          <option value="finance">EMI due</option>
+                          <option value="jobs">New jobs</option>
+                          <option value="all">All-in-one digest</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1"><Label className="text-xs">Channel</Label>
+                        <select value={r.channel} onChange={e => updateReminderM.mutate({ ...r, channel: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
+                          <option value="email">Email</option><option value="ntfy">Push (ntfy)</option><option value="both">Both</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Multiple times of day */}
+                    <div className="space-y-1">
+                      <Label className="text-xs">Times of day</Label>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        {times.map((t, idx) => (
+                          <div key={idx} className="flex items-center gap-1 border rounded-lg pl-2 pr-1 py-0.5 bg-background">
+                            <Input
+                              type="time"
+                              value={t.slice(0, 5)}
+                              className="h-7 w-[88px] border-0 px-1 focus-visible:ring-0"
+                              onChange={(e) => {
+                                const next = [...times];
+                                next[idx] = `${e.target.value}:00`;
+                                updateReminderM.mutate({ ...r, times_of_day: dedupeSorted(next) });
+                              }}
+                            />
+                            {times.length > 1 && (
+                              <button
+                                type="button"
+                                className="p-0.5 hover:bg-muted rounded"
+                                title="Remove time"
+                                onClick={() => {
+                                  const next = times.filter((_, i) => i !== idx);
+                                  updateReminderM.mutate({ ...r, times_of_day: next });
+                                }}
+                              ><X className="h-3 w-3" /></button>
+                            )}
+                          </div>
+                        ))}
+                        <Button size="sm" variant="outline" onClick={() => {
+                          const next = dedupeSorted([...times, '12:00:00']);
+                          updateReminderM.mutate({ ...r, times_of_day: next });
+                        }}><Plus className="h-3 w-3" /> Add time</Button>
+                      </div>
+                    </div>
+
+                    {/* Day-of-week chips */}
+                    <div className="space-y-1">
+                      <Label className="text-xs">Days</Label>
+                      <div className="flex gap-1 flex-wrap">
+                        {DAY_LABELS.map((d, i) => {
+                          const active = (r.days_of_week as number[]).includes(i);
+                          return (
+                            <button key={d} type="button" disabled={!r.enabled} onClick={() => {
+                              const next = active ? r.days_of_week.filter((x: number) => x !== i) : [...r.days_of_week, i].sort();
+                              updateReminderM.mutate({ ...r, days_of_week: next });
+                            }} className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>{d}</button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </fieldset>
                 </div>
-                <div className="flex gap-1 flex-wrap">
-                  {DAY_LABELS.map((d, i) => {
-                    const active = (r.days_of_week as number[]).includes(i);
-                    return (
-                      <button key={d} type="button" onClick={() => {
-                        const next = active ? r.days_of_week.filter((x: number) => x !== i) : [...r.days_of_week, i].sort();
-                        updateReminderM.mutate({ ...r, days_of_week: next });
-                      }} className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>{d}</button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))
+              );
+            })
           }
         </CardContent>
       </Card>
@@ -270,4 +382,8 @@ export function SettingsPage() {
       </Card>
     </div>
   );
+}
+
+function dedupeSorted(times: string[]): string[] {
+  return Array.from(new Set(times)).sort();
 }
