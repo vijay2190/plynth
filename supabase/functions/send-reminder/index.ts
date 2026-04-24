@@ -159,17 +159,20 @@ Deno.serve(async (req) => {
   }
 
   if (testId) {
-    const { data: r, error } = await sb.from('reminder_settings')
-      .select('*, profiles!inner(email,full_name,timezone,ntfy_topic)')
-      .eq('id', testId).maybeSingle();
-    if (error || !r) return json({ ok: false, error: 'reminder not found' }, 404);
+    const { data: r, error } = await sb.from('reminder_settings').select('*').eq('id', testId).maybeSingle();
+    if (error || !r) return json({ ok: false, error: error?.message ?? 'reminder not found' }, 404);
+    const { data: prof } = await sb.from('profiles').select('email,full_name,timezone,ntfy_topic').eq('user_id', r.user_id).maybeSingle();
+    const row = { ...(r as any), profiles: prof ?? {} } as ReminderRow;
     const now = new Date();
     const fireFor = now.toISOString().slice(0, 10);
     const fireTime = `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:00`;
-    // Bypass dedup for manual tests by deleting the row first
     await sb.from('reminder_log').delete().eq('reminder_id', testId).eq('fired_for', fireFor).eq('fired_time', fireTime);
-    const res = await dispatchOne(sb, r as ReminderRow, fireFor, fireTime, appUrl);
-    return json({ ok: res.ok, channel: res.channel, test: true });
+    try {
+      const res = await dispatchOne(sb, row, fireFor, fireTime, appUrl);
+      return json({ ok: res.ok, channel: res.channel, test: true });
+    } catch (e) {
+      return json({ ok: false, error: (e as Error).message, stack: (e as Error).stack }, 500);
+    }
   }
 
   const now = new Date();
@@ -177,14 +180,17 @@ Deno.serve(async (req) => {
   const dow = now.getUTCDay();
   const today = now.toISOString().slice(0, 10);
 
-  const { data: rules } = await sb.from('reminder_settings')
-    .select('*, profiles!inner(email,full_name,timezone,ntfy_topic)')
-    .eq('enabled', true);
+  const { data: rules } = await sb.from('reminder_settings').select('*').eq('enabled', true);
+  const userIds = Array.from(new Set((rules ?? []).map((r) => r.user_id)));
+  const { data: profs } = userIds.length
+    ? await sb.from('profiles').select('user_id,email,full_name,timezone,ntfy_topic').in('user_id', userIds)
+    : { data: [] };
+  const profMap = new Map<string, any>((profs ?? []).map((p: any) => [p.user_id, p]));
 
   let dispatched = 0;
   let skipped = 0;
   for (const raw of rules ?? []) {
-    const r = raw as ReminderRow;
+    const r = { ...(raw as any), profiles: profMap.get(raw.user_id) ?? {} } as ReminderRow;
     if (!r.days_of_week?.includes(dow)) { skipped++; continue; }
     const tz = r.profiles?.timezone ?? 'Asia/Kolkata';
     const offsetMin = tz === 'Asia/Kolkata' ? -330 : 0;
@@ -202,8 +208,12 @@ Deno.serve(async (req) => {
         .select('reminder_id').eq('reminder_id', r.id).eq('fired_for', today).eq('fired_time', t).maybeSingle();
       if (existing) continue;
 
-      const res = await dispatchOne(sb, r, today, t, appUrl);
-      if (res.ok) dispatched++;
+      try {
+        const res = await dispatchOne(sb, r, today, t, appUrl);
+        if (res.ok) dispatched++;
+      } catch (e) {
+        console.error('dispatch failed', r.id, t, e);
+      }
     }
   }
   return json({ ok: true, dispatched, skipped, scanned: rules?.length ?? 0 });

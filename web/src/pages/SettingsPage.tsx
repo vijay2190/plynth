@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2, Download, Send, Smartphone, Copy, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -8,6 +8,7 @@ import { Input, Label } from '@/components/ui/Input';
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Loader';
 import { Switch } from '@/components/ui/Switch';
+import { TimePicker } from '@/components/ui/TimePicker';
 import { supabase } from '@/lib/supabase';
 import { useSession } from '@/app/useSession';
 import { useTheme } from '@/app/ThemeProvider';
@@ -96,21 +97,21 @@ export function SettingsPage() {
   });
 
   const updateReminderM = useMutation({
-    mutationFn: async (r: any) => {
+    mutationFn: async (patch: any) => {
+      const { id, ...fields } = patch;
       // Mirror first time into the legacy time_of_day column for back-compat.
-      const patch: any = { ...r };
-      if (Array.isArray(r.times_of_day) && r.times_of_day.length) {
-        patch.time_of_day = r.times_of_day[0];
+      if (Array.isArray(fields.times_of_day) && fields.times_of_day.length) {
+        fields.time_of_day = fields.times_of_day[0];
       }
-      const { error } = await supabase.from('reminder_settings').update(patch).eq('id', r.id);
+      const { error } = await supabase.from('reminder_settings').update(fields).eq('id', id);
       if (error) throw error;
     },
-    onMutate: async (r: any) => {
-      // Optimistic update so the toggle/checkbox state never lags behind
+    onMutate: async (patch: any) => {
+      // Optimistic update so toggle/checkbox state never lags behind
       await qc.cancelQueries({ queryKey: ['reminder_settings', userId] });
       const prev = qc.getQueryData<any[]>(['reminder_settings', userId]);
       qc.setQueryData<any[]>(['reminder_settings', userId], (old) =>
-        (old ?? []).map((x) => (x.id === r.id ? { ...x, ...r } : x))
+        (old ?? []).map((x) => (x.id === patch.id ? { ...x, ...patch } : x))
       );
       return { prev };
     },
@@ -259,100 +260,16 @@ export function SettingsPage() {
 
           {remindersQ.isLoading ? <Skeleton className="h-24" /> :
             (remindersQ.data ?? []).length === 0 ? <p className="text-sm text-muted-foreground">No reminders configured.</p> :
-            (remindersQ.data ?? []).map((r: any) => {
-              const times: string[] = (r.times_of_day && r.times_of_day.length) ? r.times_of_day : [r.time_of_day ?? '07:00:00'];
-              return (
-                <div key={r.id} className={cn('rounded-lg border p-3 space-y-3 transition-opacity', !r.enabled && 'opacity-50')}>
-                  {/* Header row: enabled toggle + delete */}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <Switch checked={!!r.enabled} onCheckedChange={(v) => updateReminderM.mutate({ ...r, enabled: v })} aria-label="Enable reminder" />
-                      <span className="text-sm font-medium">{r.enabled ? 'Enabled' : 'Disabled'}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button size="sm" variant="outline" disabled={!r.enabled || testReminderM.isPending}
-                        onClick={() => testReminderM.mutate(r.id)} title="Send a test reminder right now">
-                        <Send className="h-3.5 w-3.5" /> Test
-                      </Button>
-                      <Button size="icon" variant="ghost" onClick={() => deleteReminderM.mutate(r.id)} title="Delete reminder">
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-
-                  <fieldset disabled={!r.enabled} className="space-y-3">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="space-y-1"><Label className="text-xs">Category</Label>
-                        <select value={r.category} onChange={e => updateReminderM.mutate({ ...r, category: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
-                          <option value="tasks">Tasks digest</option>
-                          <option value="learning">Learning plan</option>
-                          <option value="finance">EMI due</option>
-                          <option value="jobs">New jobs</option>
-                          <option value="all">All-in-one digest</option>
-                        </select>
-                      </div>
-                      <div className="space-y-1"><Label className="text-xs">Channel</Label>
-                        <select value={r.channel} onChange={e => updateReminderM.mutate({ ...r, channel: e.target.value })} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
-                          <option value="email">Email</option><option value="ntfy">Push (ntfy)</option><option value="both">Both</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Multiple times of day */}
-                    <div className="space-y-1">
-                      <Label className="text-xs">Times of day</Label>
-                      <div className="flex flex-wrap gap-2 items-center">
-                        {times.map((t, idx) => (
-                          <div key={idx} className="flex items-center gap-1 border rounded-lg pl-2 pr-1 py-0.5 bg-background">
-                            <Input
-                              type="time"
-                              value={t.slice(0, 5)}
-                              className="h-7 w-[88px] border-0 px-1 focus-visible:ring-0"
-                              onChange={(e) => {
-                                const next = [...times];
-                                next[idx] = `${e.target.value}:00`;
-                                updateReminderM.mutate({ ...r, times_of_day: dedupeSorted(next) });
-                              }}
-                            />
-                            {times.length > 1 && (
-                              <button
-                                type="button"
-                                className="p-0.5 hover:bg-muted rounded"
-                                title="Remove time"
-                                onClick={() => {
-                                  const next = times.filter((_, i) => i !== idx);
-                                  updateReminderM.mutate({ ...r, times_of_day: next });
-                                }}
-                              ><X className="h-3 w-3" /></button>
-                            )}
-                          </div>
-                        ))}
-                        <Button size="sm" variant="outline" onClick={() => {
-                          const next = dedupeSorted([...times, '12:00:00']);
-                          updateReminderM.mutate({ ...r, times_of_day: next });
-                        }}><Plus className="h-3 w-3" /> Add time</Button>
-                      </div>
-                    </div>
-
-                    {/* Day-of-week chips */}
-                    <div className="space-y-1">
-                      <Label className="text-xs">Days</Label>
-                      <div className="flex gap-1 flex-wrap">
-                        {DAY_LABELS.map((d, i) => {
-                          const active = (r.days_of_week as number[]).includes(i);
-                          return (
-                            <button key={d} type="button" disabled={!r.enabled} onClick={() => {
-                              const next = active ? r.days_of_week.filter((x: number) => x !== i) : [...r.days_of_week, i].sort();
-                              updateReminderM.mutate({ ...r, days_of_week: next });
-                            }} className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>{d}</button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </fieldset>
-                </div>
-              );
-            })
+            (remindersQ.data ?? []).map((r: any) => (
+              <ReminderRow
+                key={r.id}
+                row={r}
+                onChange={(patch) => updateReminderM.mutate({ id: r.id, ...patch })}
+                onDelete={() => deleteReminderM.mutate(r.id)}
+                onTest={() => testReminderM.mutate(r.id)}
+                testing={testReminderM.isPending}
+              />
+            ))
           }
         </CardContent>
       </Card>
@@ -386,4 +303,160 @@ export function SettingsPage() {
 
 function dedupeSorted(times: string[]): string[] {
   return Array.from(new Set(times)).sort();
+}
+
+interface ReminderRowProps {
+  row: any;
+  onChange: (patch: any) => void;
+  onDelete: () => void;
+  onTest: () => void;
+  testing: boolean;
+}
+
+function ReminderRow({ row, onChange, onDelete, onTest, testing }: ReminderRowProps) {
+  // Local mirror of server state — clicks update local state synchronously, server save is debounced.
+  const initial = {
+    enabled: !!row.enabled,
+    category: row.category,
+    channel: row.channel,
+    days_of_week: (row.days_of_week ?? []) as number[],
+    times_of_day: (row.times_of_day && row.times_of_day.length ? row.times_of_day : [row.time_of_day ?? '07:00:00']) as string[],
+  };
+  const [local, setLocal] = useState(initial);
+  const saveTimer = useRef<number | null>(null);
+  const lastSavedRef = useRef(initial);
+
+  // Sync from server when the row prop changes (and we're not mid-edit)
+  useEffect(() => {
+    if (saveTimer.current) return; // edit in flight, don't clobber
+    setLocal({
+      enabled: !!row.enabled,
+      category: row.category,
+      channel: row.channel,
+      days_of_week: (row.days_of_week ?? []) as number[],
+      times_of_day: (row.times_of_day && row.times_of_day.length ? row.times_of_day : [row.time_of_day ?? '07:00:00']) as string[],
+    });
+    lastSavedRef.current = {
+      enabled: !!row.enabled,
+      category: row.category,
+      channel: row.channel,
+      days_of_week: (row.days_of_week ?? []) as number[],
+      times_of_day: (row.times_of_day && row.times_of_day.length ? row.times_of_day : [row.time_of_day ?? '07:00:00']) as string[],
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row.id, row.enabled, row.category, row.channel, JSON.stringify(row.days_of_week), JSON.stringify(row.times_of_day)]);
+
+  function patch(p: Partial<typeof local>, instant = false) {
+    setLocal((cur) => {
+      const next = { ...cur, ...p };
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      const fire = () => {
+        saveTimer.current = null;
+        const dirty: any = {};
+        for (const k of Object.keys(next) as (keyof typeof next)[]) {
+          if (JSON.stringify(next[k]) !== JSON.stringify(lastSavedRef.current[k])) dirty[k] = next[k];
+        }
+        if (Object.keys(dirty).length) {
+          lastSavedRef.current = next;
+          onChange(dirty);
+        }
+      };
+      if (instant) fire(); else saveTimer.current = window.setTimeout(fire, 350);
+      return next;
+    });
+  }
+
+  function addTime() {
+    const candidates = ['09:00:00','12:00:00','15:00:00','18:00:00','21:00:00','06:00:00','11:00:00','14:00:00','17:00:00','20:00:00'];
+    const have = new Set(local.times_of_day);
+    const fresh = candidates.find((c) => !have.has(c)) ?? `${String(7 + local.times_of_day.length).padStart(2,'0')}:00:00`;
+    patch({ times_of_day: dedupeSorted([...local.times_of_day, fresh]) });
+  }
+
+  function setTime(idx: number, value: string) {
+    const next = [...local.times_of_day];
+    next[idx] = value;
+    patch({ times_of_day: dedupeSorted(next) });
+  }
+
+  function removeTime(idx: number) {
+    if (local.times_of_day.length <= 1) return;
+    patch({ times_of_day: local.times_of_day.filter((_, i) => i !== idx) });
+  }
+
+  function toggleDay(i: number) {
+    const have = local.days_of_week.includes(i);
+    const next = have ? local.days_of_week.filter((x) => x !== i) : [...local.days_of_week, i].sort();
+    patch({ days_of_week: next });
+  }
+
+  return (
+    <div className={cn('rounded-lg border p-3 space-y-3 transition-opacity', !local.enabled && 'opacity-50')}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Switch checked={local.enabled} onCheckedChange={(v) => patch({ enabled: v }, true)} aria-label="Enable reminder" />
+          <span className="text-sm font-medium">{local.enabled ? 'Enabled' : 'Disabled'}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button size="sm" variant="outline" disabled={!local.enabled || testing}
+            onClick={onTest} title="Send a test reminder right now">
+            <Send className="h-3.5 w-3.5" /> Test
+          </Button>
+          <Button size="icon" variant="ghost" onClick={onDelete} title="Delete reminder">
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      <fieldset disabled={!local.enabled} className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1"><Label className="text-xs">Category</Label>
+            <select value={local.category} onChange={(e) => patch({ category: e.target.value }, true)} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
+              <option value="tasks">Tasks digest</option>
+              <option value="learning">Learning plan</option>
+              <option value="finance">EMI due</option>
+              <option value="jobs">New jobs</option>
+              <option value="all">All-in-one digest</option>
+            </select>
+          </div>
+          <div className="space-y-1"><Label className="text-xs">Channel</Label>
+            <select value={local.channel} onChange={(e) => patch({ channel: e.target.value }, true)} className="h-9 w-full rounded-lg border border-input bg-background px-2 text-sm disabled:opacity-50">
+              <option value="email">Email</option><option value="ntfy">Push (ntfy)</option><option value="both">Both</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs">Times of day</Label>
+          <div className="flex flex-wrap gap-2 items-center">
+            {local.times_of_day.map((t, idx) => (
+              <div key={idx} className="flex items-center gap-1">
+                <TimePicker value={t} onChange={(v) => setTime(idx, v)} disabled={!local.enabled} />
+                {local.times_of_day.length > 1 && (
+                  <button type="button" className="p-1 hover:bg-muted rounded" title="Remove time" onClick={() => removeTime(idx)}>
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={addTime}><Plus className="h-3 w-3" /> Add time</Button>
+          </div>
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs">Days</Label>
+          <div className="flex gap-1 flex-wrap">
+            {DAY_LABELS.map((d, i) => {
+              const active = local.days_of_week.includes(i);
+              return (
+                <button key={d} type="button" disabled={!local.enabled} onClick={() => toggleDay(i)}
+                  className={`px-2 py-0.5 rounded text-xs ${active ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}
+                >{d}</button>
+              );
+            })}
+          </div>
+        </div>
+      </fieldset>
+    </div>
+  );
 }
