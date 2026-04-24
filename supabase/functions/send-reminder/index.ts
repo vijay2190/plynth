@@ -8,7 +8,7 @@ import { sendMail } from '../_shared/mail.ts';
 import { pushNtfy } from '../_shared/ntfy.ts';
 import { renderDigestEmail, type MailSection } from '../_shared/mail-template.ts';
 
-const WINDOW_MIN = 4; // ±4 min around cron tick (cron runs every 5 min)
+const GRACE_MIN = 30; // fire if scheduled time is within the last 30 min AND hasn't fired today (dedup ensures single fire)
 
 interface DigestData {
   sections: MailSection[];
@@ -193,15 +193,15 @@ Deno.serve(async (req) => {
     const r = { ...(raw as any), profiles: profMap.get(raw.user_id) ?? {} } as ReminderRow;
     if (!r.days_of_week?.includes(dow)) { skipped++; continue; }
     const tz = r.profiles?.timezone ?? 'Asia/Kolkata';
-    const offsetMin = tz === 'Asia/Kolkata' ? -330 : 0;
+    const offsetMin = -tzOffsetMinutes(tz, now);
 
     const times = (r.times_of_day && r.times_of_day.length) ? r.times_of_day : [r.time_of_day];
     for (const t of times) {
       if (!t) continue;
       const localMin = nowMinFromTimeOfDay(t);
       const targetUtcMin = ((localMin + offsetMin) + 1440) % 1440;
-      const diff = circularDiff(targetUtcMin, nowMin);
-      if (diff > WINDOW_MIN) continue;
+      const elapsed = (nowMin - targetUtcMin + 1440) % 1440;
+      if (elapsed > GRACE_MIN) continue;
 
       // Dedup: skip if we already fired for (reminder, today, t)
       const { data: existing } = await sb.from('reminder_log')
@@ -220,13 +220,30 @@ Deno.serve(async (req) => {
 });
 
 function pad(n: number): string { return n.toString().padStart(2, '0'); }
+
+// Returns the offset (in minutes) of the given IANA timezone from UTC at the given instant.
+// Asia/Kolkata → +330. Falls back to 0 on unknown zones.
+function tzOffsetMinutes(tz: string, at: Date): number {
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    const parts = dtf.formatToParts(at);
+    const map: Record<string, string> = {};
+    for (const p of parts) if (p.type !== 'literal') map[p.type] = p.value;
+    const asUtc = Date.UTC(
+      Number(map.year), Number(map.month) - 1, Number(map.day),
+      Number(map.hour) % 24, Number(map.minute), Number(map.second),
+    );
+    return Math.round((asUtc - at.getTime()) / 60000);
+  } catch { return 0; }
+}
+
 function nowMinFromTimeOfDay(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
-}
-function circularDiff(a: number, b: number): number {
-  const d = Math.abs(a - b);
-  return Math.min(d, 1440 - d);
 }
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
