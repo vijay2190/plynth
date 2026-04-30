@@ -629,7 +629,7 @@ function NewLoanForm({ onCreated }: { onCreated: () => void }) {
           </select>
         </div>
         <div className="space-y-1.5"><Label>Principal (₹)</Label><Input type="number" required min={0} value={f.principal_amount || ''} onChange={e => setF({ ...f, principal_amount: Number(e.target.value) })} /></div>
-        <div className="space-y-1.5"><Label>Annual interest %</Label><Input type="number" required step="0.01" min={0} value={f.interest_rate || ''} onChange={e => setF({ ...f, interest_rate: Number(e.target.value) })} /></div>
+        <div className="space-y-1.5"><Label>Annual interest %</Label><Input type="number" step="0.01" min={0} value={Number.isFinite(f.interest_rate) ? f.interest_rate : ''} onChange={e => setF({ ...f, interest_rate: e.target.value === '' ? 0 : Number(e.target.value) })} placeholder="0 for interest-free" /></div>
         <div className="space-y-1.5"><Label>Tenure (months)</Label><Input type="number" required min={1} value={f.tenure_months || ''} onChange={e => setF({ ...f, tenure_months: Number(e.target.value) })} /></div>
         <div className="space-y-1.5"><Label>EMI due day (1–28)</Label><Input type="number" min={1} max={28} value={f.emi_due_day} onChange={e => setF({ ...f, emi_due_day: Number(e.target.value) })} /></div>
         <div className="space-y-1.5 col-span-2"><Label>Start date</Label><Input type="date" required value={f.start_date} onChange={e => setF({ ...f, start_date: e.target.value })} /></div>
