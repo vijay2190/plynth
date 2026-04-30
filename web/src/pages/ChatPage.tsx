@@ -131,6 +131,10 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
   const [toolStatus, setToolStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Holds the persisted assistant message_id we are waiting to appear in
+  // history. Pending bubbles stay visible until then, so the reply never
+  // "disappears" between SSE end and the history refetch landing in state.
+  const awaitingMsgIdRef = useRef<string | null>(null);
   // Track conversation id locally so the just-created id is used for queries
   // even before the parent's prop catches up (which would otherwise remount).
   const [localCid, setLocalCid] = useState<string | null>(conversationId);
@@ -148,6 +152,17 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
   });
 
   const persisted = useMemo(() => (histQ.data ?? []).filter((m) => m.role !== 'tool' && m.role !== 'system'), [histQ.data]);
+
+  // Clear the streamed pending bubbles only once the freshly persisted
+  // assistant message actually shows up in the history query result.
+  useEffect(() => {
+    const waitId = awaitingMsgIdRef.current;
+    if (!waitId) return;
+    if (persisted.some((m) => m.id === waitId)) {
+      awaitingMsgIdRef.current = null;
+      setPending([]);
+    }
+  }, [persisted]);
 
   // auto-scroll
   useEffect(() => {
@@ -214,7 +229,11 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
           } else if (evt.error) {
             toast.error(evt.error);
           } else if (evt.done) {
-            // Refetch persisted history first, then clear pending (avoids flicker/disappear)
+            // Mark which persisted assistant id we're waiting for, then
+            // refresh history. The effect above will clear `pending` only
+            // after that message actually appears in the cache, preventing
+            // a flicker where the reply briefly disappears.
+            if (evt.message_id) awaitingMsgIdRef.current = String(evt.message_id);
             const cid = createdId ?? conversationId;
             if (cid) {
               await qc.invalidateQueries({ queryKey: ['chat', 'messages', cid] });
@@ -226,11 +245,15 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
       }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') toast.error((e as Error).message);
+      // On error/abort there is no persisted message to wait for; drop pending now.
+      awaitingMsgIdRef.current = null;
+      setPending([]);
     } finally {
       setStreaming(false);
       setToolStatus(null);
       abortRef.current = null;
-      setPending([]);
+      // NOTE: do not clear `pending` here — the effect above clears it once the
+      // persisted assistant message lands in the history query.
     }
   };
 
