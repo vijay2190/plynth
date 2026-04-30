@@ -47,31 +47,19 @@ function sseLine(obj: unknown): Uint8Array {
 
 function systemPromptDecide(): string {
   const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
   const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const monthExamples = monthNames.map((m, i) => `${m}=${now.getFullYear()}-${String(i + 1).padStart(2, '0')}`).join(', ');
   return [
-    "You are Plynth's personal assistant. The user has a productivity app tracking their tasks, learning topics, finances (budget/loans/EMIs/recurring & one-off expenses), and job applications.",
-    `Today is ${todayIso}. Current month = ${ym}. Month names map to YYYY-MM as: ${monthExamples}.`,
-    "On each turn, decide whether you need to fetch data via a tool, or whether you can answer directly.",
-    "Available tools (user-scoped, read-only):",
+    `Today=${now.toISOString().slice(0, 10)} (year=${now.getFullYear()}, current_month=${ym}). Months: Jan=01..Dec=12.`,
+    "You route a user message to ONE tool, or skip tools.",
+    "Tools (user-scoped, read-only):",
     toolsCatalogText(),
     "",
-    "RESPOND WITH ONLY ONE OF THESE JSON OBJECTS, no prose, no markdown, no code fences:",
-    `  {"action":"tool","tool":"<name>","args":{...}}`,
-    `  {"action":"final"}`,
+    'Reply with ONLY one JSON object, no prose, no fences:',
+    '  {"action":"tool","tool":"<name>","args":{...}}  OR  {"action":"final"}',
     "",
-    "Routing rules — anything about the user's own data MUST use a tool. Examples:",
-    `  - "what is my may month EMI total" / "my EMIs in May" / "loan payments this month" → {"action":"tool","tool":"get_finance_summary","args":{"year_month":"${now.getFullYear()}-05"}}`,
-    `  - "this month's budget / balance / spend" → {"action":"tool","tool":"get_finance_summary","args":{}}`,
-    `  - "list my loans" / "active loans" → {"action":"tool","tool":"list_loans","args":{"status":"active"}}`,
-    `  - "what tasks are due today" → {"action":"tool","tool":"list_tasks","args":{"status":"pending","due_window":"today"}}`,
-    `  - "what am I learning" → {"action":"tool","tool":"list_learning_topics","args":{"status":"in_progress"}}`,
-    `  - "my job applications" → {"action":"tool","tool":"list_jobs","args":{}}`,
-    "Keywords that mean USER DATA (always use a tool): my, mine, our, this/last/next month, today, tomorrow, EMI, loan, budget, expense, balance, salary, task, todo, learning, topic, plan, job, application, interview, offer, profile.",
-    "For pure general knowledge (e.g. 'what is a virtual function in C++', 'capital of France', code help) → {\"action\":\"final\"}.",
-    "After a tool result, you may call another tool OR choose action='final'. Never invent data not present in tool results.",
+    "Pick a tool when the user asks about THEIR data (my/our/this month/today/EMI/loan/budget/expense/balance/task/learning/topic/job/profile).",
+    `Examples: "may EMI total"→{"action":"tool","tool":"get_finance_summary","args":{"year_month":"${now.getFullYear()}-05"}}; "active loans"→{"action":"tool","tool":"list_loans","args":{"status":"active"}}; "tasks today"→{"action":"tool","tool":"list_tasks","args":{"status":"pending","due_window":"today"}}.`,
+    'For general knowledge (definitions, code help, world facts) → {"action":"final"}.',
   ].join('\n');
 }
 
@@ -195,9 +183,11 @@ Deno.serve(async (req) => {
         // ---- Tool decision loop (skipped for clearly-general questions) ----
         const skipDecide = !looksLikeUserData(message);
         if (!skipDecide) {
+          // Decide turn only needs the latest user message — sending full
+          // history slows prompt eval significantly on CPU.
           const decideMessages: ChatMsg[] = [
             { role: 'system', content: systemPromptDecide() },
-            ...history,
+            { role: 'user', content: message },
           ];
 
           for (let i = 0; i < MAX_TOOL_LOOPS; i++) {

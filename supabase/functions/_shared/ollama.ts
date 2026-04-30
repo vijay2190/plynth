@@ -80,12 +80,14 @@ export async function ollamaText(prompt: string, system?: string): Promise<strin
 
 const CHAT_TIMEOUT_MS = 120_000;
 
-async function chatBaseAndModel(): Promise<{ baseUrl: string; model: string }> {
+async function chatBaseAndModel(): Promise<{ baseUrl: string; model: string; decideModel: string }> {
   let baseUrl = await getSecret('OLLAMA_BASE_URL');
   if (!baseUrl) baseUrl = await getDynamicBaseUrl();
   if (!baseUrl) throw new Error('OLLAMA_BASE_URL not configured (env or system_kv)');
   const model = (await getSecret('OLLAMA_CHAT_MODEL')) || (await getSecret('OLLAMA_MODEL')) || 'qwen2.5:3b-instruct';
-  return { baseUrl: baseUrl.replace(/\/$/, ''), model };
+  // A small model is enough for the JSON-only decision turn; falls back to the main model.
+  const decideModel = (await getSecret('OLLAMA_DECIDE_MODEL')) || 'qwen2.5:0.5b-instruct';
+  return { baseUrl: baseUrl.replace(/\/$/, ''), model, decideModel };
 }
 
 // Fallback: read live tunnel URL from `public.system_kv` (key='ollama_base_url').
@@ -120,7 +122,7 @@ export interface ChatMsg { role: 'system' | 'user' | 'assistant' | 'tool'; conte
 
 /** One-shot non-streaming JSON-mode chat. Used for tool-call decisions. */
 export async function ollamaChatJSON(messages: ChatMsg[], opts?: { model?: string; timeoutMs?: number }): Promise<string> {
-  const { baseUrl, model } = await chatBaseAndModel();
+  const { baseUrl, decideModel } = await chatBaseAndModel();
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), opts?.timeoutMs ?? CHAT_TIMEOUT_MS);
   try {
@@ -128,12 +130,12 @@ export async function ollamaChatJSON(messages: ChatMsg[], opts?: { model?: strin
       method: 'POST',
       headers: await chatHeaders(),
       body: JSON.stringify({
-        model: opts?.model ?? model,
+        model: opts?.model ?? decideModel,
         messages,
         stream: false,
         format: 'json',
         keep_alive: '30m',
-        options: { temperature: 0.1, num_predict: 128 },
+        options: { temperature: 0.1, num_predict: 96, num_ctx: 2048, num_thread: 8 },
       }),
       signal: ctl.signal,
     });
@@ -169,7 +171,7 @@ export async function* ollamaChatStream(
         messages,
         stream: true,
         keep_alive: '30m',
-        options: { temperature: 0.4, num_predict: 768 },
+        options: { temperature: 0.4, num_predict: 512, num_ctx: 2048, num_thread: 8 },
       }),
       signal: ctl.signal,
     });
