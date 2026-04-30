@@ -19,8 +19,27 @@ import { admin, json, corsHeaders, userFromAuth } from '../_shared/util.ts';
 import { ollamaChatJSON, ollamaChatStream, type ChatMsg } from '../_shared/ollama.ts';
 import { runTool, toolsCatalogText } from '../_shared/chat-tools.ts';
 
-const MAX_HISTORY = 12;
-const MAX_TOOL_LOOPS = 4;
+const MAX_HISTORY = 8;
+const MAX_TOOL_LOOPS = 3;
+
+// Words that suggest the user is asking about their own Plynth data.
+// When NONE of these appear (and no tool result is already in history),
+// we skip the JSON decision turn entirely — saves one full LLM round-trip
+// on pure general-knowledge questions ("what is a virtual function").
+const USER_DATA_KEYWORDS = [
+  'my', 'mine', 'our', 'i ', "i'm", "i've", "i'll",
+  'today', 'tomorrow', 'yesterday', 'this month', 'last month', 'next month',
+  'this week', 'last week',
+  'emi', 'loan', 'budget', 'expense', 'expenses', 'balance', 'salary', 'finance', 'finances', 'spend', 'spending',
+  'task', 'tasks', 'todo', 'to-do', 'pending', 'overdue',
+  'learning', 'topic', 'topics', 'plan', 'study',
+  'job', 'jobs', 'application', 'applications', 'interview', 'offer',
+  'profile',
+];
+function looksLikeUserData(text: string): boolean {
+  const t = ' ' + text.toLowerCase() + ' ';
+  return USER_DATA_KEYWORDS.some((kw) => t.includes(kw.length === 2 ? ` ${kw} ` : kw));
+}
 
 function sseLine(obj: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(obj)}\n\n`);
@@ -162,36 +181,45 @@ Deno.serve(async (req) => {
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: unknown) => controller.enqueue(sseLine(obj));
+      // Heartbeat keeps Cloudflare/Supabase edges from closing the SSE
+      // connection during long silent gaps (e.g. while Ollama is processing
+      // a non-streaming JSON decision turn or warming up the model).
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(new TextEncoder().encode(`: ping\n\n`)); } catch { /* closed */ }
+      }, 10_000);
       try {
         send({ conversation_id: conversationId, user_message_id: userMsgRow?.id });
 
         const history = await loadHistory(sb, user.id, conversationId);
 
-        // ---- Tool decision loop ----
-        const decideMessages: ChatMsg[] = [
-          { role: 'system', content: systemPromptDecide() },
-          ...history,
-        ];
+        // ---- Tool decision loop (skipped for clearly-general questions) ----
+        const skipDecide = !looksLikeUserData(message);
+        if (!skipDecide) {
+          const decideMessages: ChatMsg[] = [
+            { role: 'system', content: systemPromptDecide() },
+            ...history,
+          ];
 
-        for (let i = 0; i < MAX_TOOL_LOOPS; i++) {
-          const raw = await ollamaChatJSON(decideMessages);
-          const parsed = safeParseJSON<{ action: string; tool?: string; args?: Record<string, unknown> }>(raw) || { action: 'final' };
-          if (parsed.action === 'tool' && parsed.tool) {
-            send({ tool_call: { name: parsed.tool, args: parsed.args ?? {} } });
-            let result: unknown; let ok = true;
-            try { result = await runTool(sb, user.id, parsed.tool, parsed.args ?? {}); }
-            catch (e) { ok = false; result = { error: (e as Error).message }; }
-            send({ tool_result: { name: parsed.tool, ok } });
-            // persist tool message
-            await sb.from('chat_messages').insert({
-              conversation_id: conversationId, user_id: user.id, role: 'tool',
-              content: '', tool_name: parsed.tool, tool_input: parsed.args ?? {}, tool_output: result as object,
-            });
-            decideMessages.push({ role: 'assistant', content: JSON.stringify({ action: 'tool', tool: parsed.tool, args: parsed.args ?? {} }) });
-            decideMessages.push({ role: 'tool', content: `Tool ${parsed.tool} returned:\n${JSON.stringify(result).slice(0, 4000)}` });
-            continue;
+          for (let i = 0; i < MAX_TOOL_LOOPS; i++) {
+            const raw = await ollamaChatJSON(decideMessages);
+            const parsed = safeParseJSON<{ action: string; tool?: string; args?: Record<string, unknown> }>(raw) || { action: 'final' };
+            if (parsed.action === 'tool' && parsed.tool) {
+              send({ tool_call: { name: parsed.tool, args: parsed.args ?? {} } });
+              let result: unknown; let ok = true;
+              try { result = await runTool(sb, user.id, parsed.tool, parsed.args ?? {}); }
+              catch (e) { ok = false; result = { error: (e as Error).message }; }
+              send({ tool_result: { name: parsed.tool, ok } });
+              // persist tool message
+              await sb.from('chat_messages').insert({
+                conversation_id: conversationId, user_id: user.id, role: 'tool',
+                content: '', tool_name: parsed.tool, tool_input: parsed.args ?? {}, tool_output: result as object,
+              });
+              decideMessages.push({ role: 'assistant', content: JSON.stringify({ action: 'tool', tool: parsed.tool, args: parsed.args ?? {} }) });
+              decideMessages.push({ role: 'tool', content: `Tool ${parsed.tool} returned:\n${JSON.stringify(result).slice(0, 4000)}` });
+              continue;
+            }
+            break; // action === 'final'
           }
-          break; // action === 'final'
         }
 
         // ---- Compose final answer (streamed) ----
@@ -217,6 +245,7 @@ Deno.serve(async (req) => {
       } catch (e) {
         send({ error: (e as Error).message });
       } finally {
+        clearInterval(heartbeat);
         controller.close();
       }
     },

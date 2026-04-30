@@ -127,7 +127,14 @@ export async function ollamaChatJSON(messages: ChatMsg[], opts?: { model?: strin
     const r = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: await chatHeaders(),
-      body: JSON.stringify({ model: opts?.model ?? model, messages, stream: false, format: 'json', options: { temperature: 0.1 } }),
+      body: JSON.stringify({
+        model: opts?.model ?? model,
+        messages,
+        stream: false,
+        format: 'json',
+        keep_alive: '30m',
+        options: { temperature: 0.1, num_predict: 128 },
+      }),
       signal: ctl.signal,
     });
     if (!r.ok) {
@@ -157,7 +164,13 @@ export async function* ollamaChatStream(
     const r = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: await chatHeaders(),
-      body: JSON.stringify({ model: opts?.model ?? model, messages, stream: true, options: { temperature: 0.4 } }),
+      body: JSON.stringify({
+        model: opts?.model ?? model,
+        messages,
+        stream: true,
+        keep_alive: '30m',
+        options: { temperature: 0.4, num_predict: 768 },
+      }),
       signal: ctl.signal,
     });
     if (!r.ok || !r.body) {
