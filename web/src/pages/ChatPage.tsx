@@ -103,7 +103,6 @@ export function ChatPage() {
 
       {/* Chat pane */}
       <ChatPane
-        key={activeId ?? 'new'}
         conversationId={activeId}
         onConversationCreated={(id) => {
           setActiveId(id);
@@ -125,17 +124,27 @@ interface PendingMsg { role: 'user' | 'assistant'; content: string; toolStatus?:
 
 function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PaneProps) {
   const { session } = useSession();
+  const qc = useQueryClient();
   const [pending, setPending] = useState<PendingMsg[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Track conversation id locally so the just-created id is used for queries
+  // even before the parent's prop catches up (which would otherwise remount).
+  const [localCid, setLocalCid] = useState<string | null>(conversationId);
+  useEffect(() => { setLocalCid(conversationId); }, [conversationId]);
+  // Reset transient state when user switches to a different conversation
+  useEffect(() => {
+    if (!streaming) { setPending([]); setInput(''); setToolStatus(null); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   const histQ = useQuery<ChatMessage[]>({
-    queryKey: ['chat', 'messages', conversationId],
-    enabled: !!conversationId,
-    queryFn: async () => (await callChatJSON({ action: 'history', conversation_id: conversationId })).messages ?? [],
+    queryKey: ['chat', 'messages', localCid],
+    enabled: !!localCid,
+    queryFn: async () => (await callChatJSON({ action: 'history', conversation_id: localCid })).messages ?? [],
   });
 
   const persisted = useMemo(() => (histQ.data ?? []).filter((m) => m.role !== 'tool' && m.role !== 'system'), [histQ.data]);
@@ -189,8 +198,10 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
           if (!payload) continue;
           let evt: any;
           try { evt = JSON.parse(payload); } catch { continue; }
-          if (evt.conversation_id && !conversationId && !createdId) {
+          if (evt.conversation_id && !localCid) {
             createdId = evt.conversation_id;
+            setLocalCid(createdId);
+            // tell parent so sidebar highlights this convo, but DO NOT remount this pane
             onConversationCreated(createdId!);
           }
           if (evt.tool_call) {
@@ -203,7 +214,12 @@ function ChatPane({ conversationId, onConversationCreated, onAfterTurn }: PanePr
           } else if (evt.error) {
             toast.error(evt.error);
           } else if (evt.done) {
-            // refresh persisted history
+            // Refetch persisted history first, then clear pending (avoids flicker/disappear)
+            const cid = createdId ?? conversationId;
+            if (cid) {
+              await qc.invalidateQueries({ queryKey: ['chat', 'messages', cid] });
+              await qc.refetchQueries({ queryKey: ['chat', 'messages', cid] });
+            }
             onAfterTurn();
           }
         }
