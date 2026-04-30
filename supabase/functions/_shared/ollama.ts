@@ -74,3 +74,94 @@ export async function ollamaText(prompt: string, system?: string): Promise<strin
   ];
   return await chat(messages, false);
 }
+
+// ---------- Chat-page helpers (no per-call timeout, larger budget) ----------
+
+const CHAT_TIMEOUT_MS = 120_000;
+
+async function chatBaseAndModel(): Promise<{ baseUrl: string; model: string }> {
+  const baseUrl = await getSecret('OLLAMA_BASE_URL');
+  if (!baseUrl) throw new Error('OLLAMA_BASE_URL not configured');
+  const model = (await getSecret('OLLAMA_CHAT_MODEL')) || (await getSecret('OLLAMA_MODEL')) || 'qwen2.5:3b-instruct';
+  return { baseUrl: baseUrl.replace(/\/$/, ''), model };
+}
+
+async function chatHeaders(): Promise<Record<string, string>> {
+  const sharedSecret = await getSecret('OLLAMA_SHARED_SECRET');
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (sharedSecret) headers['X-Plynth-Token'] = sharedSecret;
+  return headers;
+}
+
+export interface ChatMsg { role: 'system' | 'user' | 'assistant' | 'tool'; content: string }
+
+/** One-shot non-streaming JSON-mode chat. Used for tool-call decisions. */
+export async function ollamaChatJSON(messages: ChatMsg[], opts?: { model?: string; timeoutMs?: number }): Promise<string> {
+  const { baseUrl, model } = await chatBaseAndModel();
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), opts?.timeoutMs ?? CHAT_TIMEOUT_MS);
+  try {
+    const r = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: await chatHeaders(),
+      body: JSON.stringify({ model: opts?.model ?? model, messages, stream: false, format: 'json', options: { temperature: 0.1 } }),
+      signal: ctl.signal,
+    });
+    if (!r.ok) {
+      const detail = (await r.text()).slice(0, 400);
+      throw new Error(`Ollama chat ${r.status}: ${detail}`);
+    }
+    const data = await r.json();
+    return data?.message?.content ?? '';
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** Streaming chat. Yields token deltas as they arrive (Ollama NDJSON). */
+export async function* ollamaChatStream(
+  messages: ChatMsg[],
+  opts?: { model?: string; timeoutMs?: number; signal?: AbortSignal },
+): AsyncGenerator<string, void, unknown> {
+  const { baseUrl, model } = await chatBaseAndModel();
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), opts?.timeoutMs ?? CHAT_TIMEOUT_MS);
+  if (opts?.signal) {
+    if (opts.signal.aborted) ctl.abort();
+    else opts.signal.addEventListener('abort', () => ctl.abort(), { once: true });
+  }
+  try {
+    const r = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: await chatHeaders(),
+      body: JSON.stringify({ model: opts?.model ?? model, messages, stream: true, options: { temperature: 0.4 } }),
+      signal: ctl.signal,
+    });
+    if (!r.ok || !r.body) {
+      const detail = r.body ? (await r.text()).slice(0, 400) : '';
+      throw new Error(`Ollama chat stream ${r.status}: ${detail}`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          const delta: string = obj?.message?.content ?? '';
+          if (delta) yield delta;
+          if (obj?.done) return;
+        } catch { /* skip malformed line */ }
+      }
+    }
+  } finally {
+    clearTimeout(t);
+  }
+}

@@ -9,6 +9,7 @@ import { JobsPage } from '@/pages/JobsPage';
 import { TodosPage } from '@/pages/TodosPage';
 import { FinancePage } from '@/pages/FinancePage';
 import { SettingsPage } from '@/pages/SettingsPage';
+import { ChatPage } from '@/pages/ChatPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/jobs" element={<JobsPage />} />
         <Route path="/todos" element={<TodosPage />} />
         <Route path="/finance" element={<FinancePage />} />
+        <Route path="/chat" element={<ChatPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
       <Route path="/404" element={<NotFoundPage />} />

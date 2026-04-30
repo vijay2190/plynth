@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
-  LayoutDashboard, BookOpen, Briefcase, CheckSquare, Wallet, Settings,
+  LayoutDashboard, BookOpen, Briefcase, CheckSquare, Wallet, Settings, MessageCircle,
   Menu, Bell, LogOut, Moon, Sun, Monitor,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
@@ -18,6 +18,7 @@ const NAV = [
   { to: '/jobs', label: 'Jobs', icon: Briefcase },
   { to: '/todos', label: 'To-Do', icon: CheckSquare },
   { to: '/finance', label: 'Finance', icon: Wallet },
+  { to: '/chat', label: 'Chat', icon: MessageCircle },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
