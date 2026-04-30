@@ -27,21 +27,32 @@ function sseLine(obj: unknown): Uint8Array {
 }
 
 function systemPromptDecide(): string {
+  const now = new Date();
+  const todayIso = now.toISOString().slice(0, 10);
+  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthExamples = monthNames.map((m, i) => `${m}=${now.getFullYear()}-${String(i + 1).padStart(2, '0')}`).join(', ');
   return [
-    "You are Plynth's personal assistant. The user has a productivity app tracking their tasks, learning topics, finances (budget/loans/EMIs/expenses), and job applications.",
+    "You are Plynth's personal assistant. The user has a productivity app tracking their tasks, learning topics, finances (budget/loans/EMIs/recurring & one-off expenses), and job applications.",
+    `Today is ${todayIso}. Current month = ${ym}. Month names map to YYYY-MM as: ${monthExamples}.`,
     "On each turn, decide whether you need to fetch data via a tool, or whether you can answer directly.",
-    "Available tools (call user-scoped, read-only):",
+    "Available tools (user-scoped, read-only):",
     toolsCatalogText(),
     "",
-    "RESPOND WITH ONLY ONE OF THESE JSON OBJECTS, no prose:",
+    "RESPOND WITH ONLY ONE OF THESE JSON OBJECTS, no prose, no markdown, no code fences:",
     `  {"action":"tool","tool":"<name>","args":{...}}`,
-    `  {"action":"final"}                               // when ready to answer`,
+    `  {"action":"final"}`,
     "",
-    "Rules:",
-    "- Use a tool ONLY if the question is about the user's own data (their EMIs, topics, tasks, jobs, etc.).",
-    "- For general knowledge (e.g. capital of France, code help, definitions), choose action='final' immediately — DO NOT call tools.",
-    "- After receiving a tool result, you may either call another tool or choose action='final'.",
-    "- Never invent data not present in tool results.",
+    "Routing rules — anything about the user's own data MUST use a tool. Examples:",
+    `  - "what is my may month EMI total" / "my EMIs in May" / "loan payments this month" → {"action":"tool","tool":"get_finance_summary","args":{"year_month":"${now.getFullYear()}-05"}}`,
+    `  - "this month's budget / balance / spend" → {"action":"tool","tool":"get_finance_summary","args":{}}`,
+    `  - "list my loans" / "active loans" → {"action":"tool","tool":"list_loans","args":{"status":"active"}}`,
+    `  - "what tasks are due today" → {"action":"tool","tool":"list_tasks","args":{"status":"pending","due_window":"today"}}`,
+    `  - "what am I learning" → {"action":"tool","tool":"list_learning_topics","args":{"status":"in_progress"}}`,
+    `  - "my job applications" → {"action":"tool","tool":"list_jobs","args":{}}`,
+    "Keywords that mean USER DATA (always use a tool): my, mine, our, this/last/next month, today, tomorrow, EMI, loan, budget, expense, balance, salary, task, todo, learning, topic, plan, job, application, interview, offer, profile.",
+    "For pure general knowledge (e.g. 'what is a virtual function in C++', 'capital of France', code help) → {\"action\":\"final\"}.",
+    "After a tool result, you may call another tool OR choose action='final'. Never invent data not present in tool results.",
   ].join('\n');
 }
 
@@ -49,7 +60,9 @@ function systemPromptCompose(): string {
   return [
     "You are Plynth's personal assistant. Compose a friendly, concise reply for the user based on the conversation and any tool results above.",
     "Render in clean Markdown. Use bullet lists or small tables when appropriate. Format currency in INR (₹) when relevant.",
-    "If a tool result was empty, say so plainly. Never fabricate numbers, dates, or names.",
+    "If a prior message contains a tool result, USE IT — do not ask the user for clarification about data the tools already returned.",
+    "When the user asks about EMIs / loans / budget for a month, answer with the numbers from the tool result (e.g. EMI total = sum of emi_amount across active loans, or breakdown.emis from get_finance_summary). List each loan with its EMI on its own bullet.",
+    "If a tool result was empty (no rows / total = 0), say so plainly. Never fabricate numbers, dates, or names.",
   ].join('\n');
 }
 
