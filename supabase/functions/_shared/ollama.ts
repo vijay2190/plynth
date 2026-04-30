@@ -25,7 +25,8 @@ async function callOllama(baseUrl: string, path: string, body: unknown): Promise
 }
 
 async function chat(messages: unknown[], asJson: boolean): Promise<string> {
-  const baseUrl = await getSecret('OLLAMA_BASE_URL');
+  let baseUrl = await getSecret('OLLAMA_BASE_URL');
+  if (!baseUrl) baseUrl = await getDynamicBaseUrl();
   if (!baseUrl) throw new Error('OLLAMA_BASE_URL not configured');
   const model = (await getSecret('OLLAMA_MODEL')) || 'llama3.1:8b';
 
@@ -80,10 +81,32 @@ export async function ollamaText(prompt: string, system?: string): Promise<strin
 const CHAT_TIMEOUT_MS = 120_000;
 
 async function chatBaseAndModel(): Promise<{ baseUrl: string; model: string }> {
-  const baseUrl = await getSecret('OLLAMA_BASE_URL');
-  if (!baseUrl) throw new Error('OLLAMA_BASE_URL not configured');
+  let baseUrl = await getSecret('OLLAMA_BASE_URL');
+  if (!baseUrl) baseUrl = await getDynamicBaseUrl();
+  if (!baseUrl) throw new Error('OLLAMA_BASE_URL not configured (env or system_kv)');
   const model = (await getSecret('OLLAMA_CHAT_MODEL')) || (await getSecret('OLLAMA_MODEL')) || 'qwen2.5:3b-instruct';
   return { baseUrl: baseUrl.replace(/\/$/, ''), model };
+}
+
+// Fallback: read live tunnel URL from `public.system_kv` (key='ollama_base_url').
+// Cached briefly inside the same function instance for performance.
+let _cachedUrl: { url: string; at: number } | null = null;
+const URL_CACHE_MS = 30_000;
+async function getDynamicBaseUrl(): Promise<string | null> {
+  if (_cachedUrl && Date.now() - _cachedUrl.at < URL_CACHE_MS) return _cachedUrl.url;
+  const supaUrl = Deno.env.get('SUPABASE_URL');
+  const srk = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supaUrl || !srk) return null;
+  try {
+    const r = await fetch(`${supaUrl}/rest/v1/system_kv?key=eq.ollama_base_url&select=value`, {
+      headers: { apikey: srk, Authorization: `Bearer ${srk}` },
+    });
+    if (!r.ok) return null;
+    const rows = await r.json() as Array<{ value: string }>;
+    const url = rows?.[0]?.value;
+    if (url) { _cachedUrl = { url, at: Date.now() }; return url; }
+  } catch { /* ignore */ }
+  return null;
 }
 
 async function chatHeaders(): Promise<Record<string, string>> {
