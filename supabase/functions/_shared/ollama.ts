@@ -171,7 +171,7 @@ export async function* ollamaChatStream(
         messages,
         stream: true,
         keep_alive: '30m',
-        options: { temperature: 0.4, num_predict: 512, num_ctx: 2048, num_thread: 8 },
+        options: { temperature: 0.4, num_predict: 1536, num_ctx: 2048, num_thread: 8 },
       }),
       signal: ctl.signal,
     });
